@@ -1,8 +1,7 @@
-use std::{cell::UnsafeCell, iter, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::{Duration, Instant}};
+use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::Instant};
 
-use crossbeam_utils::CachePadded;
 
-use crate::{lock_queue::LockQueue, queue::Queue, scq_dcas::SCQ2Cas};
+use crate::{queue::Queue, scq_dcas::SCQ2Cas};
 
 pub mod queue;
 pub mod lock_queue;

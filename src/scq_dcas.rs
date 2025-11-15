@@ -158,7 +158,7 @@ impl<T> SCQ2Ring<T> {
             let entry = Self::get_array_entry(&self.array[head_index]).load(Ordering::Acquire) as usize;
             let mut entry_new;
             'inner: loop {
-                let entry_cycle = (entry & !(n - 1)) as usize;
+                let entry_cycle = (entry & !(n - 1));
                 if entry_cycle == head_cycle {
                     let pair = self.array[head_index].fetch_and(Self::create_pair(!0x1, ptr::null_mut()), Ordering::Release);
                     let ptr = Self::get_pointer(pair);
@@ -176,7 +176,7 @@ impl<T> SCQ2Ring<T> {
                 if !compare_signed(entry_cycle, head_cycle, cmp::Ordering::Less) {
                     break 'inner;
                 }
-                if let Ok(_) = Self::get_array_entry(&self.array[head_index]).compare_exchange_weak(entry as u64, entry_new as u64, Ordering::Release, Ordering::Relaxed) { 
+                if Self::get_array_entry(&self.array[head_index]).compare_exchange_weak(entry as u64, entry_new as u64, Ordering::Release, Ordering::Relaxed).is_ok() { 
                     break 'inner; 
                 }
             }

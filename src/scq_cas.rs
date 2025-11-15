@@ -165,7 +165,7 @@ impl SCQRing {
                     if !compare_signed(entry_cycle, head_cycle, cmp::Ordering::Less) {
                         break 'inner;
                     }
-                    if let Ok(_) = self.array[head_index].compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed) { break 'inner }
+                    if self.array[head_index].compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed).is_ok() { break 'inner }
                 }
                 let tail = self.tail.load(Ordering::Acquire);
                 if !compare_signed(tail, head + 1, cmp::Ordering::Greater) {
