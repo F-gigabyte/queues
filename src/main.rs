@@ -40,5 +40,5 @@ fn main() {
         println!("Have item {item:?}");
     }
     let duration = start.elapsed();
-    println!("Time {duration:?}")
+    println!("Time {duration:?}");
 }
