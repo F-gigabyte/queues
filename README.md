@@ -6,7 +6,7 @@
 - [LSCQ](https://docs.rs/lfqueue/0.8.1/lfqueue/)
 - [wCQ](docs.rs/wcq/0.1.0/wcq/)
 - M & S blocking
-- M & S lock-free
+- M & S lock-free *
 - SCQ DCAS
 - RCQB
 - CR Turn
@@ -16,3 +16,4 @@
 - WFQ - M & S
 - FP - SP
 - WFQ
+- Locking Queue *
