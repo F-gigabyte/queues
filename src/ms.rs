@@ -52,17 +52,11 @@ impl<T> Queue<T> for MSLockFree<T> {
             }
 
             if !next.is_null() {
-                match self.tail.compare_exchange(tail, next, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => {},
-                    Err(_) => {},
-                }
+                if let Ok(_) = self.tail.compare_exchange(tail, next, Ordering::Release, Ordering::Relaxed) {}
                 continue;
             }
             unsafe {
-                match (*tail).next.compare_exchange(next, node, Ordering::Acquire, Ordering::Relaxed) {
-                    Ok(_) => break,
-                    Err(_) => {},
-                }
+                if let Ok(_) = (*tail).next.compare_exchange(next, node, Ordering::Acquire, Ordering::Relaxed) { break }
             }
         }
         Ok(())
@@ -82,18 +76,12 @@ impl<T> Queue<T> for MSLockFree<T> {
                return None
            }
            if head == tail {
-               match self.tail.compare_exchange(tail, next, Ordering::Release, Ordering::Relaxed) {
-                   Ok(_) => {},
-                   Err(_) => {},
-               }
+               if let Ok(_) = self.tail.compare_exchange(tail, next, Ordering::Release, Ordering::Relaxed) {}
            }
            data = unsafe {
                mem::replace(&mut (*next).value, MaybeUninit::uninit()).assume_init()
            };
-           match self.head.compare_exchange(head, next, Ordering::Release, Ordering::Relaxed) {
-               Ok(_) => break,
-               Err(_) => {},
-           }
+           if let Ok(_) = self.head.compare_exchange(head, next, Ordering::Release, Ordering::Relaxed) { break }
         }
         handle.hazard.retire(handle.thread_id, head);
         Some(data)

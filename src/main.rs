@@ -1,7 +1,7 @@
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::Instant};
 
 
-use crate::{ms::MSLockFree, queue::Queue, scq_dcas::SCQ2Cas};
+use crate::{ms::MSLockFree, queue::Queue};
 
 pub mod queue;
 pub mod lock_queue;
