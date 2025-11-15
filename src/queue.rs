@@ -1,0 +1,18 @@
+use std::{cell::UnsafeCell, iter};
+
+use crossbeam_utils::CachePadded;
+
+#[derive(Debug)]
+pub struct QueueFull;
+
+pub trait Queue<T>
+{
+    type Handle;
+    fn register(&self, thread_id: usize) -> Self::Handle; 
+    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> Result<(), QueueFull>;
+    fn dequeue(&self, handle: &mut Self::Handle) -> Option<T>;
+}
+
+pub trait ThreadHandles<HANDLE> {
+    fn allocate_handles(threads: usize) -> Vec<CachePadded<UnsafeCell<HANDLE>>>;
+}
