@@ -1,4 +1,4 @@
-use std::{cell::UnsafeCell, iter};
+use std::cell::UnsafeCell;
 
 use crossbeam_utils::CachePadded;
 

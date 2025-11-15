@@ -1,4 +1,4 @@
-use std::{cell::UnsafeCell, mem::MaybeUninit, sync::Mutex, iter};
+use std::{cell::UnsafeCell, mem::MaybeUninit, sync::Mutex};
 
 use crossbeam_utils::CachePadded;
 
@@ -84,7 +84,7 @@ impl<T> Queue<T> for LockQueue<T> {
     }
 
     fn register(&self, _: usize) -> Self::Handle {
-        ()
+        
     }
 }
 

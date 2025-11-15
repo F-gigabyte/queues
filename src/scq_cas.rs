@@ -84,7 +84,7 @@ impl SCQRing {
         loop {
             let tail = self.tail.fetch_add(1, Ordering::Acquire);
             let tail_cycle = (tail << 1) | (2 * n - 1);
-            let tail_index = tail as usize % n;
+            let tail_index = tail % n;
             let entry = self.array[tail_index].load(Ordering::Acquire);
 
             // retry:
@@ -137,7 +137,7 @@ impl SCQRing {
         loop {
             let head = self.head.fetch_add(1, Ordering::Acquire);
             let head_cycle = (head << 1) | (2 * n - 1);
-            let head_index = head as usize % n;
+            let head_index = head % n;
             let mut attempt = 0;
             'again: loop {
                 let entry = self.array[head_index].load(Ordering::Acquire);
@@ -165,10 +165,7 @@ impl SCQRing {
                     if !compare_signed(entry_cycle, head_cycle, cmp::Ordering::Less) {
                         break 'inner;
                     }
-                    match self.array[head_index].compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed) {
-                        Ok(_) => break 'inner,
-                        Err(_) => {}
-                    }
+                    if let Ok(_) = self.array[head_index].compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed) { break 'inner }
                 }
                 let tail = self.tail.load(Ordering::Acquire);
                 if !compare_signed(tail, head + 1, cmp::Ordering::Greater) {
@@ -224,14 +221,14 @@ impl<T> Queue<T> for SCQCas<T> {
                 self.data[index].get().read().assume_init()
             };
             self.fq.enqueue(index);
-            return Some(val)
+            Some(val)
         } else {
-            return None
+            None
         }
     }
 
     fn register(&self, _: usize) -> Self::Handle {
-        ()
+        
     }
 }
 

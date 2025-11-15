@@ -127,7 +127,7 @@ impl<T> SCQ2Ring<T> {
         loop {
             let head = self.head.fetch_add(1, Ordering::Acquire);
             let head_cycle = head & !(n - 1);
-            let head_index = head as usize % n;
+            let head_index = head % n;
             let entry = self.array[head_index].load(Ordering::Acquire);
             let mut entry_new;
             'inner: loop {
@@ -138,7 +138,7 @@ impl<T> SCQ2Ring<T> {
                     ptr -= 1;
                     return Some(ptr as *mut T);
                 }
-                if (entry & ((!(0x2 as u64)) as u128)) as usize != entry_cycle {
+                if (entry & ((!0x2_u64) as u128)) as usize != entry_cycle {
                     entry_new = entry | 0x2;
                     if entry == entry_new {
                         break 'inner;
@@ -150,10 +150,7 @@ impl<T> SCQ2Ring<T> {
                 if !compare_signed(entry_cycle, head_cycle, cmp::Ordering::Less) {
                     break 'inner;
                 }
-                match self.array[head_index].compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => break 'inner,
-                    Err(_) => {},
-                }
+                if let Ok(_) = self.array[head_index].compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed) { break 'inner }
             }
             let tail = self.tail.load(Ordering::Acquire);
             if !compare_signed(tail, head + 1, cmp::Ordering::Greater) {
@@ -188,13 +185,9 @@ impl<T> Queue<T> for SCQ2Cas<T> {
     }
 
     fn dequeue(&self, _: &mut Self::Handle) -> Option<T> {
-        if let Some(item) = self.ring.dequeue() {
-            Some(unsafe {
+        self.ring.dequeue().map(|item| unsafe {
                 *Box::from_raw(item)
             })
-        } else {
-            None
-        }
     }
 
     fn register(&self, _: usize) -> Self::Handle {
