@@ -1,4 +1,4 @@
-use std::{cmp, marker::PhantomData, ptr, sync::atomic::{AtomicIsize, AtomicUsize, Ordering}, usize};
+use std::{cmp, marker::PhantomData, ptr, sync::atomic::{AtomicIsize, AtomicU64, AtomicUsize, Ordering}, usize};
 
 use crossbeam_utils::CachePadded;
 use portable_atomic::AtomicU128;
@@ -8,6 +8,9 @@ use crate::queue::{Queue, QueueFull};
 pub struct SCQ2Handle {
     lhead: usize,
 }
+
+unsafe impl Send for SCQ2Handle {}
+unsafe impl Sync for SCQ2Handle {}
 
 struct SCQ2Ring<T> {
     head: CachePadded<AtomicUsize>,
@@ -39,6 +42,30 @@ impl<T> SCQ2Ring<T> {
             tail: CachePadded::new(AtomicUsize::new(n)), 
             array: CachePadded::new(data),
             _phantom: PhantomData,
+        }
+    }
+
+    fn get_array_entry(array_pair: &AtomicU128) -> &AtomicU64 {
+        if cfg!(target_endian = "little") {
+            unsafe {
+                AtomicU64::from_ptr((array_pair.as_ptr() as *mut u64).add(1))
+            }
+        } else {
+            unsafe {
+                AtomicU64::from_ptr(array_pair.as_ptr() as *mut u64)
+            }
+        }
+    }
+    
+    fn get_array_pointer(array_pair: &AtomicU128) -> &AtomicU64 {
+        if cfg!(target_endian = "little") {
+            unsafe {
+                AtomicU64::from_ptr(array_pair.as_ptr() as *mut u64)
+            }
+        } else {
+            unsafe {
+                AtomicU64::from_ptr((array_pair.as_ptr() as *mut u64).add(1))
+            }
         }
     }
 
@@ -128,29 +155,30 @@ impl<T> SCQ2Ring<T> {
             let head = self.head.fetch_add(1, Ordering::Acquire);
             let head_cycle = head & !(n - 1);
             let head_index = head % n;
-            let entry = self.array[head_index].load(Ordering::Acquire);
+            let entry = Self::get_array_entry(&self.array[head_index]).load(Ordering::Acquire) as usize;
             let mut entry_new;
             'inner: loop {
-                let entry_cycle = (entry & !(n as u128 - 1)) as usize;
+                let entry_cycle = (entry & !(n - 1)) as usize;
                 if entry_cycle == head_cycle {
                     let pair = self.array[head_index].fetch_and(Self::create_pair(!0x1, ptr::null_mut()), Ordering::Release);
-                    let mut ptr = Self::get_pointer(pair);
-                    ptr -= 1;
+                    let ptr = Self::get_pointer(pair);
                     return Some(ptr as *mut T);
                 }
-                if (entry & ((!0x2_u64) as u128)) as usize != entry_cycle {
+                if (entry & (!0x2)) != entry_cycle {
                     entry_new = entry | 0x2;
                     if entry == entry_new {
                         break 'inner;
                     }
                 } else {
-                    entry_new = head_cycle as u128 | (entry & 0x2);
+                    entry_new = head_cycle | (entry & 0x2);
                 }
                 // while condition
                 if !compare_signed(entry_cycle, head_cycle, cmp::Ordering::Less) {
                     break 'inner;
                 }
-                if let Ok(_) = self.array[head_index].compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed) { break 'inner }
+                if let Ok(_) = Self::get_array_entry(&self.array[head_index]).compare_exchange_weak(entry as u64, entry_new as u64, Ordering::Release, Ordering::Relaxed) { 
+                    break 'inner; 
+                }
             }
             let tail = self.tail.load(Ordering::Acquire);
             if !compare_signed(tail, head + 1, cmp::Ordering::Greater) {
