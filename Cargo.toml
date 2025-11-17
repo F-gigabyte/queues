@@ -6,7 +6,4 @@ edition = "2024"
 [dependencies]
 crossbeam-utils = "0.8.21"
 hazard = "0.3.1"
-lfqueue = "0.8.1"
-nblfq = "0.1.0"
 portable-atomic = "1.11.1"
-wcq = "0.1.0"

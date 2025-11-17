@@ -1,13 +1,13 @@
 # queues
 
-- [NBLFQ](https://docs.rs/nblfq/0.1.0/nblfq/)
-- [CC Queue](https://github.com/lemonrock/cc-queue/tree/master)
-- [SCQ CAS](https://docs.rs/lfqueue/0.8.1/lfqueue/)
-- [LSCQ](https://docs.rs/lfqueue/0.8.1/lfqueue/)
-- [wCQ](docs.rs/wcq/0.1.0/wcq/)
-- M & S blocking
+- NBLFQ
+- CC Queue
+- SCQ CAS *
+- LSCQ
+- wCQ
+- M & S blocking *
 - M & S lock-free *
-- SCQ DCAS
+- SCQ DCAS *
 - RCQB
 - CR Turn
 - LCRQ

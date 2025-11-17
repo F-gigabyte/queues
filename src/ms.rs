@@ -1,28 +1,28 @@
-use std::{mem::{self, MaybeUninit}, ptr, sync::atomic::{AtomicPtr, Ordering}};
+use std::{mem::{self, MaybeUninit}, ptr::{self, NonNull}, sync::{Mutex, atomic::{AtomicPtr, Ordering}}};
 
 use hazard::{BoxMemory, Pointers};
 
 use crate::queue::Queue;
 
-struct Node<T> {
+struct LockFreeNode<T> {
     value: MaybeUninit<T>,
-    next: AtomicPtr<Node<T>>,
+    next: AtomicPtr<LockFreeNode<T>>,
 }
 
 pub struct MSLockFree<T> {
-    head: AtomicPtr<Node<T>>,
-    tail: AtomicPtr<Node<T>>,
+    head: AtomicPtr<LockFreeNode<T>>,
+    tail: AtomicPtr<LockFreeNode<T>>,
     num_threads: usize,
 }
 
 pub struct MSLockFreeHandle<T> {
     thread_id: usize,
-    hazard: Pointers<Node<T>, BoxMemory>
+    hazard: Pointers<LockFreeNode<T>, BoxMemory>
 }
 
 impl<T> MSLockFree<T> {
     pub fn new(num_threads: usize) -> Self {
-        let node = Box::into_raw(Box::new(Node {
+        let node = Box::into_raw(Box::new(LockFreeNode {
             value: MaybeUninit::uninit(),
             next: AtomicPtr::new(ptr::null_mut()) 
         }));
@@ -38,7 +38,7 @@ impl<T> Queue<T> for MSLockFree<T> {
     type Handle = MSLockFreeHandle<T>;
 
     fn enqueue(&self, item: T, handle: &mut Self::Handle) -> Result<(), crate::queue::QueueFull> {
-        let node = Box::into_raw(Box::new(Node {
+        let node = Box::into_raw(Box::new(LockFreeNode {
             value: MaybeUninit::new(item),
             next: AtomicPtr::new(ptr::null_mut()),
         }));
@@ -94,3 +94,76 @@ impl<T> Queue<T> for MSLockFree<T> {
         }
     }
 }
+
+pub struct Node<T> {
+    value: MaybeUninit<T>,
+    next: Option<NonNull<Node<T>>>,
+}
+
+pub struct MSLocking<T> {
+    head: Mutex<NonNull<Node<T>>>,
+    tail: Mutex<NonNull<Node<T>>>,
+}
+
+impl<T> MSLocking<T> {
+    pub fn new() -> Self {
+        let node = NonNull::new(Box::into_raw(Box::new(Node {
+            value: MaybeUninit::uninit(),
+            next: None,
+        }))).unwrap();
+        Self { 
+            head: Mutex::new(node), 
+            tail: Mutex::new(node), 
+        }
+    }
+}
+
+impl<T> Queue<T> for MSLocking<T> {
+    type Handle = ();
+    
+    fn enqueue(&self, item: T, _: &mut Self::Handle) -> Result<(), crate::queue::QueueFull> {
+        let node = NonNull::new(Box::into_raw(Box::new(Node {
+            value: MaybeUninit::new(item),
+            next: None,
+        })));
+        {
+            let mut tail = self.tail.lock().unwrap();
+            unsafe {
+                (*tail.as_ptr()).next = node;
+            }
+            *tail = node.unwrap();
+        }
+        Ok(())
+    }
+
+    fn dequeue(&self, _: &mut Self::Handle) -> Option<T> {
+        let node;
+        let data;
+        {
+            let mut head = self.head.lock().unwrap();
+            node = head.as_ptr();
+            let new_head = unsafe {
+                (*node).next
+            };
+            if let Some(new_head) = new_head {
+                data = unsafe {
+                    mem::replace(&mut (*new_head.as_ptr()).value, MaybeUninit::uninit()).assume_init()
+                };
+                *head = new_head;
+            } else {
+                return None;
+            }
+        }
+        unsafe {
+            let _ = Box::from_raw(node);
+        }
+        Some(data)
+    }
+
+    fn register(&self, _: usize) -> Self::Handle {
+        ()
+    }
+}
+
+unsafe impl<T> Send for MSLocking<T> {}
+unsafe impl<T> Sync for MSLocking<T> {}
