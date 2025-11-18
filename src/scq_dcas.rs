@@ -16,7 +16,7 @@ struct SCQ2Ring<T> {
     head: CachePadded<AtomicUsize>,
     threshold: CachePadded<AtomicIsize>,
     tail: CachePadded<AtomicUsize>,
-    array: CachePadded<Box<[AtomicU128]>>,
+    array: Box<[CachePadded<AtomicU128>]>,
     _phantom: PhantomData<T>,
 }
 
@@ -35,12 +35,12 @@ impl<T> SCQ2Ring<T> {
         // LEN greater than 0
         assert!(len > 0);
         let n = len * 2;
-        let data: Box<[AtomicU128]> = (0..n).map(|_| AtomicU128::new(0)).collect();
+        let data: Box<[CachePadded<AtomicU128>]> = (0..n).map(|_| CachePadded::new(AtomicU128::new(0))).collect();
         Self { 
             head: CachePadded::new(AtomicUsize::new(n)), 
             threshold: CachePadded::new(AtomicIsize::new(-1)), 
             tail: CachePadded::new(AtomicUsize::new(n)), 
-            array: CachePadded::new(data),
+            array: data,
             _phantom: PhantomData,
         }
     }

@@ -1,17 +1,18 @@
 use std::{mem::{self, MaybeUninit}, ptr::{self, NonNull}, sync::{Mutex, atomic::{AtomicPtr, Ordering}}};
 
+use crossbeam_utils::CachePadded;
 use hazard::{BoxMemory, Pointers};
 
 use crate::queue::Queue;
 
 struct LockFreeNode<T> {
-    value: MaybeUninit<T>,
-    next: AtomicPtr<LockFreeNode<T>>,
+    value: CachePadded<MaybeUninit<T>>,
+    next: CachePadded<AtomicPtr<LockFreeNode<T>>>,
 }
 
 pub struct MSLockFree<T> {
-    head: AtomicPtr<LockFreeNode<T>>,
-    tail: AtomicPtr<LockFreeNode<T>>,
+    head: CachePadded<AtomicPtr<LockFreeNode<T>>>,
+    tail: CachePadded<AtomicPtr<LockFreeNode<T>>>,
     num_threads: usize,
 }
 
@@ -23,12 +24,12 @@ pub struct MSLockFreeHandle<T> {
 impl<T> MSLockFree<T> {
     pub fn new(num_threads: usize) -> Self {
         let node = Box::into_raw(Box::new(LockFreeNode {
-            value: MaybeUninit::uninit(),
-            next: AtomicPtr::new(ptr::null_mut()) 
+            value: CachePadded::new(MaybeUninit::uninit()),
+            next: CachePadded::new(AtomicPtr::new(ptr::null_mut())) 
         }));
         Self { 
-            head: AtomicPtr::new(node),
-            tail: AtomicPtr::new(node),
+            head: CachePadded::new(AtomicPtr::new(node)),
+            tail: CachePadded::new(AtomicPtr::new(node)),
             num_threads
         }
     }
@@ -39,8 +40,8 @@ impl<T> Queue<T> for MSLockFree<T> {
 
     fn enqueue(&self, item: T, handle: &mut Self::Handle) -> Result<(), crate::queue::QueueFull> {
         let node = Box::into_raw(Box::new(LockFreeNode {
-            value: MaybeUninit::new(item),
-            next: AtomicPtr::new(ptr::null_mut()),
+            value: CachePadded::new(MaybeUninit::new(item)),
+            next: CachePadded::new(AtomicPtr::new(ptr::null_mut())),
         }));
         loop {
             let tail = handle.hazard.mark(handle.thread_id, 0, &self.tail);
@@ -79,7 +80,7 @@ impl<T> Queue<T> for MSLockFree<T> {
                if let Ok(_) = self.tail.compare_exchange(tail, next, Ordering::Release, Ordering::Relaxed) {}
            }
            data = unsafe {
-               mem::replace(&mut (*next).value, MaybeUninit::uninit()).assume_init()
+               mem::replace(&mut (*(*next).value), MaybeUninit::uninit()).assume_init()
            };
            if let Ok(_) = self.head.compare_exchange(head, next, Ordering::Release, Ordering::Relaxed) { break }
         }
@@ -101,8 +102,8 @@ pub struct Node<T> {
 }
 
 pub struct MSLocking<T> {
-    head: Mutex<NonNull<Node<T>>>,
-    tail: Mutex<NonNull<Node<T>>>,
+    head: CachePadded<Mutex<NonNull<Node<T>>>>,
+    tail: CachePadded<Mutex<NonNull<Node<T>>>>,
 }
 
 impl<T> MSLocking<T> {
@@ -112,8 +113,8 @@ impl<T> MSLocking<T> {
             next: None,
         }))).unwrap();
         Self { 
-            head: Mutex::new(node), 
-            tail: Mutex::new(node), 
+            head: CachePadded::new(Mutex::new(node)), 
+            tail: CachePadded::new(Mutex::new(node)), 
         }
     }
 }

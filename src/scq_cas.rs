@@ -8,7 +8,7 @@ struct SCQRing {
     head: CachePadded<AtomicUsize>,
     threshold: CachePadded<AtomicIsize>,
     tail: CachePadded<AtomicUsize>,
-    array: CachePadded<Box<[AtomicUsize]>>,
+    array: Box<[CachePadded<AtomicUsize>]>,
 }
 
 unsafe impl Send for SCQRing {}
@@ -26,12 +26,12 @@ impl SCQRing {
         // LEN greater than 0
         assert!(len > 0);
         let n = len * 2;
-        let data: Box<[AtomicUsize]> = (0..n).map(|_| AtomicUsize::new(usize::MAX)).collect();
+        let data: Box<[CachePadded<AtomicUsize>]> = (0..n).map(|_| CachePadded::new(AtomicUsize::new(usize::MAX))).collect();
         Self { 
             head: CachePadded::new(AtomicUsize::new(0)), 
             threshold: CachePadded::new(AtomicIsize::new(-1)), 
             tail: CachePadded::new(AtomicUsize::new(0)), 
-            array: CachePadded::new(data),
+            array: data,
         }
     }
 
@@ -41,7 +41,7 @@ impl SCQRing {
         // LEN greater than 0
         assert!(len > 0);
         let n = len * 2;
-        let data: Box<[AtomicUsize]> = (0..n).map(|_| AtomicUsize::new(usize::MAX)).collect();
+        let data: Box<[CachePadded<AtomicUsize>]> = (0..n).map(|_| CachePadded::new(AtomicUsize::new(usize::MAX))).collect();
         for i in 0..len {
             data[i].store(n + i % len, Ordering::Release);
         }
@@ -49,7 +49,7 @@ impl SCQRing {
             head: CachePadded::new(AtomicUsize::new(0)), 
             threshold: CachePadded::new(AtomicIsize::new(len as isize + n as isize - 1)), 
             tail: CachePadded::new(AtomicUsize::new(len)), 
-            array: CachePadded::new(data), 
+            array: data, 
         }
     }
 
@@ -62,7 +62,7 @@ impl SCQRing {
         // start and end are less than n
         assert!(start < n);
         assert!(end < n);
-        let array: Box<[AtomicUsize]> = (0..n).map(|_| AtomicUsize::new(usize::MAX)).collect();
+        let array: Box<[CachePadded<AtomicUsize>]> = (0..n).map(|_| CachePadded::new(AtomicUsize::new(usize::MAX))).collect();
         for i in 0..start {
             array[i % n].store(2 * n - 1, Ordering::Release);
         }
@@ -73,7 +73,7 @@ impl SCQRing {
             head: CachePadded::new(AtomicUsize::new(start)), 
             threshold: CachePadded::new(AtomicIsize::new(len as isize + n as isize - 1)), 
             tail: CachePadded::new(AtomicUsize::new(end)), 
-            array: CachePadded::new(array), 
+            array, 
         }
     }
 
@@ -186,13 +186,13 @@ impl SCQRing {
 pub struct SCQCas<T> {
     aq: SCQRing,
     fq: SCQRing,
-    data: Box<[UnsafeCell<MaybeUninit<T>>]>,
+    data: Box<[CachePadded<UnsafeCell<MaybeUninit<T>>>]>,
 }
 
 impl<T> SCQCas<T> {
     pub fn new(len: usize) -> Self {
         let len = len.next_power_of_two();
-        let data: Box<[UnsafeCell<MaybeUninit<T>>]> = (0..len).map(|_| UnsafeCell::new(MaybeUninit::uninit())).collect();
+        let data: Box<[CachePadded<UnsafeCell<MaybeUninit<T>>>]> = (0..len).map(|_| CachePadded::new(UnsafeCell::new(MaybeUninit::uninit()))).collect();
         Self { 
             aq: SCQRing::new_empty(len), 
             fq: SCQRing::new_full(len), 

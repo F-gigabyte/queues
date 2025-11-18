@@ -1,19 +1,23 @@
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::Instant};
 
 
-use crate::{ms::{MSLockFree, MSLocking}, queue::Queue, scq_cas::SCQCas};
+use crate::{cc_queue::CCQueue, ms::{MSLockFree, MSLocking}, nblfq::{NBLFQDCas, NBLFQTagged}, queue::Queue, scq_cas::SCQCas};
 
 pub mod queue;
 pub mod lock_queue;
 pub mod scq_cas;
 pub mod scq_dcas;
 pub mod ms;
+pub mod nblfq;
+pub mod tagged_ptr;
+pub mod csynch;
+pub mod cc_queue;
 
 fn main() {
-    let num_threads = 32;
+    let num_threads = 64;
     let items = Arc::new([10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160]);
     //let queue = LockQueue::new(16);
-    let queue2 = Arc::new(MSLocking::new());
+    let queue2 = Arc::new(MSLockFree::new(num_threads));
 
     let mut threads = Vec::new();
     let begin_tasks = Arc::new(AtomicBool::new(false));
