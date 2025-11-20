@@ -12,6 +12,7 @@ pub mod nblfq;
 pub mod tagged_ptr;
 pub mod csynch;
 pub mod cc_queue;
+pub mod lcrq;
 
 fn main() {
     let num_threads = 64;
