@@ -3,7 +3,7 @@ use std::{marker::PhantomData, ptr, sync::atomic::{AtomicU64, Ordering}};
 use crossbeam_utils::CachePadded;
 use portable_atomic::AtomicU128;
 
-use crate::{queue::{Queue, QueueFull}, tagged_ptr::TaggedPtr};
+use crate::{queue::{EnqueueResult, Queue, QueueFull}, tagged_ptr::TaggedPtr};
 
 pub struct NBLFQTagged<T> {
     array: Box<[CachePadded<AtomicU64>]>,
@@ -41,7 +41,7 @@ impl<T> NBLFQTagged<T> {
 impl<T> Queue<T> for NBLFQTagged<T> {
     type Handle = NBLFQHandle;
 
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> Result<(), QueueFull> {
+    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
         let item = Box::into_raw(Box::new(item));
         loop {
             let mut h = handle.head;
@@ -60,10 +60,10 @@ impl<T> Queue<T> for NBLFQTagged<T> {
                     }
                     else if p.ptr.is_some() && u.ptr.is_some() {
                         handle.head = h;
-                        unsafe {
-                            _ = Box::from_raw(item);
-                        }
-                        return Err(QueueFull);
+                        let item = unsafe {
+                            *Box::from_raw(item)
+                        };
+                        return Err(QueueFull(item));
                     }
                 }
                 h = (h + 1) % self.array.len();

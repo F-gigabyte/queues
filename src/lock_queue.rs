@@ -2,7 +2,7 @@ use std::{cell::UnsafeCell, mem::MaybeUninit, sync::Mutex};
 
 use crossbeam_utils::CachePadded;
 
-use crate::queue::{Queue, QueueFull};
+use crate::queue::{EnqueueResult, Queue, QueueFull};
 
 pub struct LockQueueInner<T> {
     data: Box<[UnsafeCell<MaybeUninit<T>>]>,
@@ -22,7 +22,7 @@ impl<T> LockQueueInner<T> {
         }
     }
 
-    pub fn enqueue(&mut self, item: T) -> Result<(), QueueFull> {
+    pub fn enqueue(&mut self, item: T) -> EnqueueResult<T> {
         if self.len < self.data.len() {
             unsafe {
                 self.data[self.tail].get().write(MaybeUninit::new(item));
@@ -31,7 +31,7 @@ impl<T> LockQueueInner<T> {
             self.len += 1;
             Ok(())
         } else {
-            Err(QueueFull {})
+            Err(QueueFull(item))
         }
     }
 
@@ -73,7 +73,7 @@ impl<T> LockQueue<T> {
 
 impl<T> Queue<T> for LockQueue<T> {
     type Handle = ();
-    fn enqueue(&self, item: T, _: &mut Self::Handle) -> Result<(), crate::queue::QueueFull> {
+    fn enqueue(&self, item: T, _: &mut Self::Handle) -> EnqueueResult<T> {
         let mut inner = self.inner.lock().unwrap();
         inner.enqueue(item)
     }

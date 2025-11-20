@@ -3,7 +3,7 @@ use std::{mem::{self, MaybeUninit}, ptr::{self, NonNull}, sync::{Mutex, atomic::
 use crossbeam_utils::CachePadded;
 use hazard::{BoxMemory, Pointers};
 
-use crate::queue::Queue;
+use crate::queue::{EnqueueResult, Queue};
 
 struct LockFreeNode<T> {
     value: CachePadded<MaybeUninit<T>>,
@@ -38,7 +38,7 @@ impl<T> MSLockFree<T> {
 impl<T> Queue<T> for MSLockFree<T> {
     type Handle = MSLockFreeHandle<T>;
 
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> Result<(), crate::queue::QueueFull> {
+    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
         let node = Box::into_raw(Box::new(LockFreeNode {
             value: CachePadded::new(MaybeUninit::new(item)),
             next: CachePadded::new(AtomicPtr::new(ptr::null_mut())),
@@ -122,7 +122,7 @@ impl<T> MSLocking<T> {
 impl<T> Queue<T> for MSLocking<T> {
     type Handle = ();
     
-    fn enqueue(&self, item: T, _: &mut Self::Handle) -> Result<(), crate::queue::QueueFull> {
+    fn enqueue(&self, item: T, _: &mut Self::Handle) -> EnqueueResult<T> {
         let node = NonNull::new(Box::into_raw(Box::new(Node {
             value: MaybeUninit::new(item),
             next: None,

@@ -3,7 +3,7 @@ use std::{cmp, marker::PhantomData, ptr, sync::atomic::{AtomicIsize, AtomicU64, 
 use crossbeam_utils::CachePadded;
 use portable_atomic::AtomicU128;
 
-use crate::queue::{Queue, QueueFull};
+use crate::queue::{EnqueueResult, Queue, QueueFull};
 
 pub struct SCQ2Handle {
     lhead: usize,
@@ -81,14 +81,18 @@ impl<T> SCQ2Ring<T> {
         ((entry as u128) << 64) | (ptr as u128)
     }
 
-    pub fn enqueue(&self, ptr: *mut T, lhead: &mut usize) -> Result<(), QueueFull> {
+    pub fn enqueue(&self, item: T, lhead: &mut usize) -> EnqueueResult<T> {
+        let item = Box::into_raw(Box::new(item));
         let n = self.array.len();
 
         let tail = self.tail.load(Ordering::Acquire);
         if tail >= *lhead + n {
             *lhead = self.head.load(Ordering::Acquire);
             if tail >= *lhead + n {
-                return Err(QueueFull);
+                let item = unsafe {
+                    *Box::from_raw(item)
+                };
+                return Err(QueueFull(item));
             }
         }
         loop {
@@ -104,7 +108,7 @@ impl<T> SCQ2Ring<T> {
                 if compare_signed(entry_cycle, tail_cycle, cmp::Ordering::Less) && 
                     (entry == entry_cycle || 
                      ((entry == (entry_cycle | 0x2)) && self.head.load(Ordering::Acquire) <= tail)) {
-                        match self.array[tail_index].compare_exchange_weak(pair, Self::create_pair((tail_cycle | 1) as u64, ptr), Ordering::Acquire, Ordering::Relaxed) {
+                        match self.array[tail_index].compare_exchange_weak(pair, Self::create_pair((tail_cycle | 1) as u64, item), Ordering::Acquire, Ordering::Relaxed) {
                             Ok(_) => {
                                 if self.threshold.load(Ordering::Acquire) != (2 * n as isize - 1) {
                                     self.threshold.store(2 * n as isize - 1, Ordering::Release);
@@ -124,7 +128,10 @@ impl<T> SCQ2Ring<T> {
             if tail + 1 >= *lhead + n {
                 *lhead = self.head.load(Ordering::Acquire);
                 if tail + 1 >= *lhead + n {
-                    return Err(QueueFull{});
+                    let item = unsafe {
+                        *Box::from_raw(item)
+                    };
+                    return Err(QueueFull(item));
                 }
             }
         }
@@ -145,7 +152,7 @@ impl<T> SCQ2Ring<T> {
         }
     }
 
-    pub fn dequeue(&self) -> Option<*mut T> {
+    pub fn dequeue(&self) -> Option<T> {
         let n = self.array.len();
         if self.threshold.load(Ordering::Acquire) < 0 {
             return None;
@@ -162,7 +169,10 @@ impl<T> SCQ2Ring<T> {
                 if entry_cycle == head_cycle {
                     let pair = self.array[head_index].fetch_and(Self::create_pair(!0x1, ptr::null_mut()), Ordering::Release);
                     let ptr = Self::get_pointer(pair);
-                    return Some(ptr as *mut T);
+                    let item = unsafe {
+                        *Box::from_raw(ptr as *mut T)
+                    };
+                    return Some(item);
                 }
                 if (entry & (!0x2)) != entry_cycle {
                     entry_new = entry | 0x2;
@@ -208,14 +218,12 @@ impl<T> SCQ2Cas<T> {
 
 impl<T> Queue<T> for SCQ2Cas<T> {
     type Handle = SCQ2Handle;
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> Result<(), QueueFull> {
-        self.ring.enqueue(Box::into_raw(Box::new(item)), &mut handle.lhead)
+    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+        self.ring.enqueue(item, &mut handle.lhead)
     }
 
     fn dequeue(&self, _: &mut Self::Handle) -> Option<T> {
-        self.ring.dequeue().map(|item| unsafe {
-                *Box::from_raw(item)
-            })
+        self.ring.dequeue()
     }
 
     fn register(&self, _: usize) -> Self::Handle {
@@ -227,11 +235,7 @@ impl<T> Queue<T> for SCQ2Cas<T> {
 
 impl<T> Drop for SCQ2Cas<T> {
     fn drop(&mut self) {
-        while let Some(item) = self.ring.dequeue() {
-            unsafe {
-                let _ = *Box::from_raw(item);
-            }
-        }
+        while let Some(_) = self.ring.dequeue() {}
     }
 }
 

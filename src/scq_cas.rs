@@ -2,7 +2,7 @@ use std::{cell::UnsafeCell, cmp, mem::MaybeUninit, sync::atomic::{AtomicIsize, A
 
 use crossbeam_utils::CachePadded;
 
-use crate::queue::{Queue, QueueFull};
+use crate::queue::{EnqueueResult, Queue, QueueFull};
 
 struct SCQRing {
     head: CachePadded<AtomicUsize>,
@@ -203,7 +203,7 @@ impl<T> SCQCas<T> {
 
 impl<T> Queue<T> for SCQCas<T> {
     type Handle = ();
-    fn enqueue(&self, item: T, _: &mut Self::Handle) -> Result<(), QueueFull> {
+    fn enqueue(&self, item: T, _: &mut Self::Handle) -> EnqueueResult<T> {
         if let Some(index) = self.fq.dequeue() {
             unsafe {
                 self.data[index].get().write(MaybeUninit::new(item));
@@ -211,7 +211,7 @@ impl<T> Queue<T> for SCQCas<T> {
             self.aq.enqueue(index);
             Ok(())
         } else {
-            Err(QueueFull {})
+            Err(QueueFull(item))
         }
     }
 

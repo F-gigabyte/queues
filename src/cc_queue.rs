@@ -10,16 +10,16 @@ struct Node<T> {
     next: Option<NonNull<Node<T>>>,
 }
 
-type EnqueueFunc<T> = fn(&CCQueue<T>, T) -> EnqueueResult;
+type EnqueueFunc<T> = fn(&CCQueue<T>, T) -> EnqueueResult<T>;
 type DequeueFunc<T> = fn(&CCQueue<T>, ()) -> Option<T>;
 
 pub struct CCQueueHandle<T> {
-    enq: CSynchHandle<T, T, EnqueueResult, EnqueueFunc<T>>,
+    enq: CSynchHandle<T, T, EnqueueResult<T>, EnqueueFunc<T>>,
     deq: CSynchHandle<T, (), Option<T>, DequeueFunc<T>>,
 }
 
 pub struct CCQueue<T> {
-    enq: CachePadded<CSynch<T, T, Result<(), QueueFull>, EnqueueFunc<T>>>,
+    enq: CachePadded<CSynch<T, T, Result<(), QueueFull<T>>, EnqueueFunc<T>>>,
     deq: CachePadded<CSynch<T, (), Option<T>, DequeueFunc<T>>>,
     head: UnsafeCell<NonNull<Node<T>>>,
     tail: UnsafeCell<NonNull<Node<T>>>,
@@ -39,7 +39,7 @@ impl<T> CCQueue<T> {
         }
     }
 
-    fn serial_enqueue(self: &Self, item: T) -> EnqueueResult {
+    fn serial_enqueue(self: &Self, item: T) -> EnqueueResult<T> {
         let node = NonNull::new(Box::into_raw(Box::new(Node {
             data: MaybeUninit::new(item),
             next: None,
@@ -72,7 +72,7 @@ impl<T> CCQueue<T> {
 impl<T> Queue<T> for CCQueue<T> {
     type Handle = CCQueueHandle<T>;
 
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult {
+    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
         self.enq.apply(&mut handle.enq, self, item, Self::serial_enqueue)
     }
 
