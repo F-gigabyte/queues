@@ -190,7 +190,7 @@ impl<T> NBLFQDCas<T> {
 impl<T> Queue<T> for NBLFQDCas<T> {
     type Handle = NBLFQHandle;
 
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> Result<(), QueueFull> {
+    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
         let item = Box::into_raw(Box::new(item));
         loop {
             let mut h = handle.head;
@@ -209,10 +209,10 @@ impl<T> Queue<T> for NBLFQDCas<T> {
                     }
                     else if !p.ptr.is_null() && !u.ptr.is_null() {
                         handle.head = h;
-                        unsafe {
-                            _ = Box::from_raw(item);
-                        }
-                        return Err(QueueFull);
+                        let item = unsafe {
+                            *Box::from_raw(item)
+                        };
+                        return Err(QueueFull(item));
                     }
                 }
                 h = (h + 1) % self.array.len();

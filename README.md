@@ -7,7 +7,7 @@
 6. M & S blocking *
 7. M & S lock-free *
 8. Locking Queue *
-9. LSCQ
+9. LSCQ *
 10. wCQ
 11. RCQB
 12. CR Turn

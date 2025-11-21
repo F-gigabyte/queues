@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, ptr, sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
+use std::{marker::PhantomData, mem, ptr::{self, null_mut}, sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
 
 use crossbeam_utils::CachePadded;
 use hazard::{BoxMemory, Pointers};
@@ -203,9 +203,9 @@ impl<T> CRQ<T> {
                         match slot.compare_exchange(u128::from(node), u128::from(new_node), Ordering::Release, Ordering::Relaxed) {
                             Ok(_) => {
                                 let val = unsafe {
-                                    Box::from_raw(node.ptr)
+                                    *Box::from_raw(node.ptr)
                                 };
-                                return Some(*val)
+                                return Some(val)
                             },
                             Err(_) => {},
                         }
@@ -230,27 +230,26 @@ impl<T> CRQ<T> {
 
 impl<T> Drop for CRQ<T> {
     fn drop(&mut self) {
-        let mut head = self.head.load(Ordering::Acquire);
-        let tail = self.tail.load(Ordering::Acquire);
-        while head < tail {
-            let node = Node::<T>::from(self.array[head % self.array.len()].load(Ordering::Acquire));
+        let mut h = self.head.load(Ordering::Acquire);
+        let t = self.tail.load(Ordering::Acquire) & !Self::CLOSED_MASK;
+        while h < t {
+            let node = Node::<T>::from(self.array[h % self.array.len()].load(Ordering::Acquire));
             unsafe {
                 _ = Box::from_raw(node.ptr);
             }
-            head += 1;
+            h += 1;
         }
     }
 }
 
-struct LCRQHandle<T> {
+pub struct LCRQHandle {
     thread_id: usize,
-    hazard: Pointers<CRQ<T>, BoxMemory>
 }
 
 pub struct LCRQ<T> {
     head: CachePadded<AtomicPtr<CRQ<T>>>,
     tail: CachePadded<AtomicPtr<CRQ<T>>>,
-    num_threads: usize,
+    hazard: Pointers<CRQ<T>, BoxMemory>
 }
 
 impl<T> LCRQ<T> {
@@ -259,63 +258,89 @@ impl<T> LCRQ<T> {
         Self { 
             head: CachePadded::new(AtomicPtr::new(crq)), 
             tail: CachePadded::new(AtomicPtr::new(crq)), 
-            num_threads
+            hazard: Pointers::new(BoxMemory, num_threads, 1, num_threads * 2),
         }
     }
 }
 
 impl<T> Queue<T> for LCRQ<T> {
-    type Handle = LCRQHandle<T>;
+    type Handle = LCRQHandle;
     fn enqueue(&self, mut item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
         loop {
-            let crq_ptr = handle.hazard.mark(handle.thread_id, 0, &*self.tail);
+            let crq_ptr = self.hazard.mark(handle.thread_id, 0, &*self.tail);
             let crq = unsafe {
                 &*crq_ptr
             };
             let next = crq.next.load(Ordering::Acquire);
             if !next.is_null() {
                 let _ = self.tail.compare_exchange(crq_ptr, next, Ordering::Release, Ordering::Relaxed);
-                handle.hazard.clear(handle.thread_id, 0);
                 continue;
             }
             match crq.enqueue(item) {
                 Ok(_) => {
-                    handle.hazard.clear(handle.thread_id, 0);
+                    self.hazard.clear(handle.thread_id, 0);
                     return Ok(())
                 },
                 Err(QueueFull(item2)) => {
                     let new_crq = Box::into_raw(Box::new(CRQ::with_elem(RING_SIZE, item2)));
-                    match self.tail.compare_exchange(ptr::null_mut(), new_crq, Ordering::Release, Ordering::Relaxed) {
+                    match crq.next.compare_exchange(ptr::null_mut(), new_crq, Ordering::Release, Ordering::Relaxed) {
                         Ok(_) => {
                             _ = self.tail.compare_exchange(crq_ptr, new_crq, Ordering::Release, Ordering::Relaxed);
-                            handle.hazard.clear(handle.thread_id, 0);
+                            self.hazard.clear(handle.thread_id, 0);
                             return Ok(());
                         },
                         Err(_) => {
                             let new_crq = unsafe {
                                 *Box::from_raw(new_crq)
                             };
-                            let item_box = unsafe {
-                                Box::from_raw(Node::<T>::from(*new_crq.array[0].as_ptr()).ptr)
+                            let mut node = unsafe {
+                                Node::<T>::from(*new_crq.array[0].as_ptr())
                             };
-                            item = *item_box;
+                            let item_ptr = node.ptr;
+                            node.ptr = null_mut();
+                            unsafe {
+                                *new_crq.array[0].as_ptr() = u128::from(node);
+                                *new_crq.head.as_ptr() = 0;
+                                *new_crq.tail.as_ptr() = 0;
+                            }
+                            item = unsafe {
+                                *Box::from_raw(item_ptr)
+                            };
                         },
                     }
                 }
             }
-            handle.hazard.clear(handle.thread_id, 0);
+            self.hazard.clear(handle.thread_id, 0);
         }
     }
 
     fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
         loop {
+            let crq_ptr = self.hazard.mark(handle.thread_id, 0, &*self.head);
+            let crq = unsafe {
+                &*crq_ptr
+            };
+            if let Some(v) = crq.dequeue() {
+                self.hazard.clear(handle.thread_id, 0);
+                return Some(v);
+            }
+            let next = crq.next.load(Ordering::Acquire);
+            if next.is_null() {
+                self.hazard.clear(handle.thread_id, 0);
+                return None;
+            }
+            self.hazard.clear(handle.thread_id, 0);
+            self.hazard.retire(handle.thread_id, crq_ptr);
+            _ = self.head.compare_exchange_weak(crq_ptr, next, Ordering::Release, Ordering::Relaxed);
         }
     }
 
     fn register(&self, thread_id: usize) -> Self::Handle {
         Self::Handle {
-            thread_id,
-            hazard: Pointers::new(BoxMemory{}, self.num_threads, 1, self.num_threads)
+            thread_id
         }
     }
 }
+
+unsafe impl<T> Send for LCRQ<T> {}
+unsafe impl<T> Sync for LCRQ<T> {}

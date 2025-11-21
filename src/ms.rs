@@ -13,12 +13,11 @@ struct LockFreeNode<T> {
 pub struct MSLockFree<T> {
     head: CachePadded<AtomicPtr<LockFreeNode<T>>>,
     tail: CachePadded<AtomicPtr<LockFreeNode<T>>>,
-    num_threads: usize,
+    hazard: Pointers<LockFreeNode<T>, BoxMemory>
 }
 
-pub struct MSLockFreeHandle<T> {
+pub struct MSLockFreeHandle {
     thread_id: usize,
-    hazard: Pointers<LockFreeNode<T>, BoxMemory>
 }
 
 impl<T> MSLockFree<T> {
@@ -30,13 +29,13 @@ impl<T> MSLockFree<T> {
         Self { 
             head: CachePadded::new(AtomicPtr::new(node)),
             tail: CachePadded::new(AtomicPtr::new(node)),
-            num_threads
+            hazard: Pointers::new(BoxMemory, num_threads, 2, 2 * num_threads)
         }
     }
 }
 
 impl<T> Queue<T> for MSLockFree<T> {
-    type Handle = MSLockFreeHandle<T>;
+    type Handle = MSLockFreeHandle;
 
     fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
         let node = Box::into_raw(Box::new(LockFreeNode {
@@ -44,7 +43,7 @@ impl<T> Queue<T> for MSLockFree<T> {
             next: CachePadded::new(AtomicPtr::new(ptr::null_mut())),
         }));
         loop {
-            let tail = handle.hazard.mark(handle.thread_id, 0, &self.tail);
+            let tail = self.hazard.mark_ptr(handle.thread_id, 0, self.tail.load(Ordering::Acquire));
             let next = unsafe {
                 (*tail).next.load(Ordering::Acquire)
             };
@@ -66,14 +65,17 @@ impl<T> Queue<T> for MSLockFree<T> {
     fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
         let mut data;
         let mut head;
+        let mut next;
         loop {
-           head = handle.hazard.mark(handle.thread_id, 0, &self.head);
+           head = self.hazard.mark_ptr(handle.thread_id, 0, self.head.load(Ordering::Acquire));
            let tail = self.tail.load(Ordering::Acquire);
-           let next = handle.hazard.mark(handle.thread_id, 1, unsafe{ &(*head).next});
+           next = self.hazard.mark_ptr(handle.thread_id, 1, unsafe{ (*head).next.load(Ordering::Acquire)});
            if head != self.head.load(Ordering::Acquire) {
                continue;
            }
            if next.is_null() {
+               self.hazard.clear(handle.thread_id, 0);
+               self.hazard.clear(handle.thread_id, 1);
                return None
            }
            if head == tail {
@@ -84,17 +86,40 @@ impl<T> Queue<T> for MSLockFree<T> {
            };
            if let Ok(_) = self.head.compare_exchange(head, next, Ordering::Release, Ordering::Relaxed) { break }
         }
-        handle.hazard.retire(handle.thread_id, head);
+        self.hazard.clear(handle.thread_id, 0);
+        self.hazard.clear(handle.thread_id, 1);
+        self.hazard.retire(handle.thread_id, head);
         Some(data)
     }
 
     fn register(&self, thread_id: usize) -> Self::Handle {
         MSLockFreeHandle {
-            thread_id,
-            hazard: Pointers::new(BoxMemory{}, self.num_threads, 2, 2 * self.num_threads)
+            thread_id
         }
     }
 }
+
+impl<T> Drop for MSLockFree<T> {
+    fn drop(&mut self) {
+        let mut head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
+        while head != tail {
+            let next = unsafe {
+                (*head).next.load(Ordering::Acquire)
+            };
+            unsafe {
+                _ = Box::from_raw(head);
+            }
+            head = next;
+        }
+        unsafe {
+            _ = Box::from_raw(tail);
+        }
+    }
+}
+
+unsafe impl<T> Send for MSLockFree<T> {}
+unsafe impl<T> Sync for MSLockFree<T> {}
 
 pub struct Node<T> {
     value: MaybeUninit<T>,
@@ -163,6 +188,25 @@ impl<T> Queue<T> for MSLocking<T> {
 
     fn register(&self, _: usize) -> Self::Handle {
         ()
+    }
+}
+
+impl<T> Drop for MSLocking<T> {
+    fn drop(&mut self) {
+        let mut head = self.head.lock().unwrap().as_ptr();
+        let tail = self.tail.lock().unwrap().as_ptr();
+        while head != tail {
+            let next = unsafe {
+                (*head).next
+            };
+            unsafe {
+                _ = Box::from_raw(head);
+            }
+            head = next.map(|v| v.as_ptr()).unwrap_or(ptr::null_mut());
+        }
+        unsafe {
+            _ = Box::from_raw(tail);
+        }
     }
 }
 
