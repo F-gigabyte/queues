@@ -1,32 +1,31 @@
-use std::{marker::PhantomData, mem, ptr::{self, null_mut}, sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
+use std::{marker::PhantomData, ptr::{self, null_mut}, sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
 
 use crossbeam_utils::CachePadded;
 use hazard::{BoxMemory, Pointers};
-use portable_atomic::AtomicU128;
 
-use crate::queue::{EnqueueResult, Queue, QueueFull};
+use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull}};
 
 pub const RING_SIZE: usize = 16;
 
 struct Node<T> {
-    index: u64,
+    index: usize,
     ptr: *mut T,
     _phantom: PhantomData<T>
 }
 
 impl<T> Node<T> {
-    const SAFE_SHIFT: u64 = 63;
-    const SAFE_MASK: u64 = 1 << Self::SAFE_SHIFT;
+    const SAFE_SHIFT: u32 = usize::BITS - 1;
+    const SAFE_MASK: usize = 1 << Self::SAFE_SHIFT;
 
     pub fn from_index(index: usize) -> Self {
         Self { 
-            index: index as u64 | Self::SAFE_MASK, 
+            index: index | Self::SAFE_MASK, 
             ptr: ptr::null_mut(), 
             _phantom: PhantomData
         }
     }
 
-    pub fn new(index: u64, safe: bool, ptr: *mut T) -> Self {
+    pub fn new(index: usize, safe: bool, ptr: *mut T) -> Self {
         assert!(index < Self::SAFE_MASK);
         Self {
             index: index | if safe { Self::SAFE_MASK } else { 0 },
@@ -39,7 +38,7 @@ impl<T> Node<T> {
         self.index & Self::SAFE_MASK != 0
     }
 
-    pub fn get_index(&self) -> u64 {
+    pub fn get_index(&self) -> usize {
         self.index & !Self::SAFE_MASK
     }
 }
@@ -56,19 +55,19 @@ impl<T> Clone for Node<T> {
 
 impl<T> Copy for Node<T> {}
 
-impl<T> From<u128> for Node<T> {
-    fn from(value: u128) -> Self {
+impl<T> From<DUsize> for Node<T> {
+    fn from(value: DUsize) -> Self {
         Node { 
-            index: ((value >> 64) & u64::MAX as u128) as u64, 
-            ptr: (value & u64::MAX as u128) as *mut T, 
+            index: ((value >> usize::BITS) & usize::MAX as DUsize) as usize, 
+            ptr: (value & usize::MAX as DUsize) as *mut T, 
             _phantom: PhantomData
         }
     }
 }
 
-impl<T> From<Node<T>> for u128 {
+impl<T> From<Node<T>> for DUsize {
     fn from(value: Node<T>) -> Self {
-        ((value.index as u128) << 64) | value.ptr as u128
+        ((value.index as DUsize) << usize::BITS) | value.ptr as DUsize
     }
 }
 
@@ -76,7 +75,7 @@ struct CRQ<T> {
     head: CachePadded<AtomicUsize>,
     tail: CachePadded<AtomicUsize>,
     next: CachePadded<AtomicPtr<CRQ<T>>>,
-    array: Box<[CachePadded<AtomicU128>]>,
+    array: Box<[CachePadded<AtomicDUsize>]>,
     _phantom: PhantomData<T>,
 }
 
@@ -84,7 +83,7 @@ impl<T> CRQ<T> {
     const CLOSED_SHIFT: usize = usize::BITS as usize - 1;
     const CLOSED_MASK: usize = 1 << Self::CLOSED_SHIFT;
     pub fn new(len: usize) -> Self {
-        let array: Box<[CachePadded<AtomicU128>]> = (0..len).map(|v| CachePadded::new(AtomicU128::new(u128::from(Node::<T>::from_index(v))))).collect();
+        let array: Box<[CachePadded<AtomicDUsize>]> = (0..len).map(|v| CachePadded::new(AtomicDUsize::new(DUsize::from(Node::<T>::from_index(v))))).collect();
         Self { 
             head: CachePadded::new(AtomicUsize::new(0)), 
             tail: CachePadded::new(AtomicUsize::new(0)), 
@@ -96,11 +95,11 @@ impl<T> CRQ<T> {
 
     pub fn with_elem(len: usize, elem: T) -> Self {
         let elem = Box::into_raw(Box::new(elem));
-        let array: Box<[CachePadded<AtomicU128>]> = (0..len)
+        let array: Box<[CachePadded<AtomicDUsize>]> = (0..len)
             .map(|v| {
-                CachePadded::new(AtomicU128::new(u128::from(
+                CachePadded::new(AtomicDUsize::new(DUsize::from(
                 if v == 0 {
-                    Node::new(v as u64, true, elem)
+                    Node::new(v as usize, true, elem)
                 } else {
                     Node::<T>::from_index(v)
                 })))
@@ -165,8 +164,8 @@ impl<T> CRQ<T> {
             if node.ptr.is_null() && 
                 node.get_index() as usize <= t && 
                     (node.is_safe() || self.head.load(Ordering::Acquire) <= t) {
-                        let new_node = Node::new(t as u64, true, val);
-                        match slot.compare_exchange(u128::from(node), u128::from(new_node), Ordering::Release, Ordering::Relaxed) {
+                        let new_node = Node::new(t, true, val);
+                        match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed) {
                             Ok(_) => {
                                 return Ok(())
                             },
@@ -194,13 +193,13 @@ impl<T> CRQ<T> {
             let slot = &self.array[h % self.array.len()];
             let node = Node::<T>::from(slot.load(Ordering::Acquire));
             loop {
-                if node.get_index() > h as u64 {
+                if node.get_index() > h {
                     break;
                 }
                 if !node.ptr.is_null() {
-                    if node.get_index() == h as u64 {
-                        let new_node = Node::<T>::new((h + self.array.len()) as u64, node.is_safe(), ptr::null_mut());
-                        match slot.compare_exchange(u128::from(node), u128::from(new_node), Ordering::Release, Ordering::Relaxed) {
+                    if node.get_index() == h {
+                        let new_node = Node::<T>::new(h + self.array.len(), node.is_safe(), ptr::null_mut());
+                        match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed) {
                             Ok(_) => {
                                 let val = unsafe {
                                     *Box::from_raw(node.ptr)
@@ -211,8 +210,8 @@ impl<T> CRQ<T> {
                         }
                     }
                 } else {
-                    let new_node = Node::<T>::new((h + self.array.len()) as u64, node.is_safe(), ptr::null_mut());
-                    match slot.compare_exchange(u128::from(node), u128::from(new_node), Ordering::Release, Ordering::Relaxed) {
+                    let new_node = Node::<T>::new(h + self.array.len(), node.is_safe(), ptr::null_mut());
+                    match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed) {
                         Ok(_) => break,
                         Err(_) => {},
                     }
@@ -249,6 +248,8 @@ pub struct LCRQHandle {
 pub struct LCRQ<T> {
     head: CachePadded<AtomicPtr<CRQ<T>>>,
     tail: CachePadded<AtomicPtr<CRQ<T>>>,
+    current_thread: AtomicUsize,
+    num_threads: usize,
     hazard: Pointers<CRQ<T>, BoxMemory>
 }
 
@@ -259,6 +260,8 @@ impl<T> LCRQ<T> {
             head: CachePadded::new(AtomicPtr::new(crq)), 
             tail: CachePadded::new(AtomicPtr::new(crq)), 
             hazard: Pointers::new(BoxMemory, num_threads, 1, num_threads * 2),
+            num_threads,
+            current_thread: AtomicUsize::new(0)
         }
     }
 }
@@ -299,7 +302,7 @@ impl<T> Queue<T> for LCRQ<T> {
                             let item_ptr = node.ptr;
                             node.ptr = null_mut();
                             unsafe {
-                                *new_crq.array[0].as_ptr() = u128::from(node);
+                                *new_crq.array[0].as_ptr() = DUsize::from(node);
                                 *new_crq.head.as_ptr() = 0;
                                 *new_crq.tail.as_ptr() = 0;
                             }
@@ -335,9 +338,14 @@ impl<T> Queue<T> for LCRQ<T> {
         }
     }
 
-    fn register(&self, thread_id: usize) -> Self::Handle {
-        Self::Handle {
-            thread_id
+    fn register(&self) -> HandleResult<Self::Handle> {
+        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        if thread_id < self.num_threads {
+            Ok(Self::Handle {
+                thread_id
+            })
+        } else {
+            Err(HandleError)
         }
     }
 }

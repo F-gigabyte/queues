@@ -6,6 +6,8 @@ pub struct TaggedPtr<T> {
 }
 
 impl<T> TaggedPtr<T> {
+    pub const PTR_BITS: u32 = usize::BITS - 16;
+    const PTR_MASK: usize = (1 << Self::PTR_BITS) - 1;
     pub fn new(ptr: Option<NonNull<T>>, tag: u16) -> Self {
         Self { 
             ptr, 
@@ -21,17 +23,17 @@ impl<T> TaggedPtr<T> {
     }
 }
 
-impl<T> From<u64> for TaggedPtr<T> {
-    fn from(value: u64) -> Self {
-        let tag = ((value >> 48) & 0xffff) as u16;
-        let ptr = (value & 0xffffffffffff) as usize as *mut T;
+impl<T> From<usize> for TaggedPtr<T> {
+    fn from(value: usize) -> Self {
+        let tag = ((value >> Self::PTR_BITS) & u16::MAX as usize) as u16;
+        let ptr = (value & Self::PTR_MASK) as *mut T;
         Self::from_raw(ptr, tag)
     }
 }
 
-impl<T> From<TaggedPtr<T>> for u64 {
+impl<T> From<TaggedPtr<T>> for usize {
     fn from(value: TaggedPtr<T>) -> Self {
-        ((value.tag as u64) << 48) | ((value.ptr.map(|v| v.as_ptr()).unwrap_or(ptr::null_mut()) as u64) & 0xffffffffffff)
+        ((value.tag as usize) << TaggedPtr::<T>::PTR_BITS) | ((value.ptr.map(|v| v.as_ptr()).unwrap_or(ptr::null_mut()) as usize) & TaggedPtr::<T>::PTR_MASK)
     }
 }
 

@@ -1,7 +1,7 @@
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::Instant};
 
 
-use crate::{cc_queue::CCQueue, lcrq::LCRQ, ms::{MSLockFree, MSLocking}, nblfq::{NBLFQDCas, NBLFQTagged}, queue::Queue, scq_cas::SCQCas};
+use crate::{cc_queue::CCQueue, lcrq::LCRQ, ms::{MSLockFree, MSLocking}, nblfq::{NBLFQDCas, NBLFQTagged}, queue::Queue, scq_cas::SCQCas, wcq::WCQ};
 
 pub mod queue;
 pub mod lock_queue;
@@ -13,12 +13,14 @@ pub mod tagged_ptr;
 pub mod csynch;
 pub mod cc_queue;
 pub mod lcrq;
+pub mod wcq;
+pub mod atomic_types;
 
 fn main() {
     let num_threads = 64;
     let items = Arc::new([10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160]);
     //let queue = LockQueue::new(16);
-    let queue2 = Arc::new(MSLockFree::new(num_threads));
+    let queue2 = Arc::new(WCQ::new(items.len() * num_threads, num_threads + 1));
 
     let mut threads = Vec::new();
     let begin_tasks = Arc::new(AtomicBool::new(false));
@@ -28,7 +30,7 @@ fn main() {
         let items = Arc::clone(&items);
         let begin_tasks = Arc::clone(&begin_tasks);
         threads.push(thread::spawn(move || {
-            let mut handle = queue2.register(i);
+            let mut handle = queue2.register().unwrap();
             while !begin_tasks.load(Ordering::Acquire) {}
             for item in *items {
                 queue2.enqueue((i, item), &mut handle).unwrap();
@@ -40,7 +42,7 @@ fn main() {
     for thread in threads {
         thread.join().unwrap();
     }
-    let mut handle = queue2.register(0);
+    let mut handle = queue2.register().unwrap();
     while let Some(item) = queue2.dequeue(&mut handle) {
         println!("Have item {item:?}");
     }

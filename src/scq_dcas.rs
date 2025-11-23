@@ -1,9 +1,8 @@
-use std::{cmp, marker::PhantomData, ptr, sync::atomic::{AtomicIsize, AtomicU64, AtomicUsize, Ordering}, usize};
+use std::{cmp, marker::PhantomData, ptr, sync::atomic::{AtomicIsize, AtomicUsize, Ordering}, usize};
 
 use crossbeam_utils::CachePadded;
-use portable_atomic::AtomicU128;
 
-use crate::queue::{EnqueueResult, Queue, QueueFull};
+use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleResult, Queue, QueueFull}};
 
 pub struct SCQ2Handle {
     lhead: usize,
@@ -16,7 +15,7 @@ struct SCQ2Ring<T> {
     head: CachePadded<AtomicUsize>,
     threshold: CachePadded<AtomicIsize>,
     tail: CachePadded<AtomicUsize>,
-    array: Box<[CachePadded<AtomicU128>]>,
+    array: Box<[CachePadded<AtomicDUsize>]>,
     _phantom: PhantomData<T>,
 }
 
@@ -29,13 +28,17 @@ fn compare_signed(a: usize, b: usize, oper: cmp::Ordering) -> bool {
 }
 
 impl<T> SCQ2Ring<T> {
+    const fn threshold4(n: usize) -> isize {
+        (2 * n - 1) as isize
+    }
+
     pub fn new_empty(len: usize) -> Self {
         // LEN must be a power of 2
         assert!(len & (len - 1) == 0);
         // LEN greater than 0
         assert!(len > 0);
         let n = len * 2;
-        let data: Box<[CachePadded<AtomicU128>]> = (0..n).map(|_| CachePadded::new(AtomicU128::new(0))).collect();
+        let data: Box<[CachePadded<AtomicDUsize>]> = (0..n).map(|_| CachePadded::new(AtomicDUsize::new(0))).collect();
         Self { 
             head: CachePadded::new(AtomicUsize::new(n)), 
             threshold: CachePadded::new(AtomicIsize::new(-1)), 
@@ -45,40 +48,40 @@ impl<T> SCQ2Ring<T> {
         }
     }
 
-    fn get_array_entry(array_pair: &AtomicU128) -> &AtomicU64 {
+    fn get_array_entry(array_pair: &AtomicDUsize) -> &AtomicUsize {
         if cfg!(target_endian = "little") {
             unsafe {
-                AtomicU64::from_ptr((array_pair.as_ptr() as *mut u64).add(1))
+                AtomicUsize::from_ptr((array_pair.as_ptr() as *mut usize).add(1))
             }
         } else {
             unsafe {
-                AtomicU64::from_ptr(array_pair.as_ptr() as *mut u64)
+                AtomicUsize::from_ptr(array_pair.as_ptr() as *mut usize)
             }
         }
     }
     
-    fn get_array_pointer(array_pair: &AtomicU128) -> &AtomicU64 {
+    fn get_array_pointer(array_pair: &AtomicDUsize) -> &AtomicUsize {
         if cfg!(target_endian = "little") {
             unsafe {
-                AtomicU64::from_ptr(array_pair.as_ptr() as *mut u64)
+                AtomicUsize::from_ptr(array_pair.as_ptr() as *mut usize)
             }
         } else {
             unsafe {
-                AtomicU64::from_ptr((array_pair.as_ptr() as *mut u64).add(1))
+                AtomicUsize::from_ptr((array_pair.as_ptr() as *mut usize).add(1))
             }
         }
     }
 
-    fn get_entry(pair: u128) -> u64 {
-        ((pair >> 64) & u64::MAX as u128) as u64
+    fn get_entry(pair: DUsize) -> usize {
+        ((pair >> usize::BITS) & usize::MAX as DUsize) as usize
     }
 
-    fn get_pointer(pair: u128) -> u64 {
-        (pair & u64::MAX as u128) as u64
+    fn get_pointer(pair: DUsize) -> usize {
+        (pair & usize::MAX as DUsize) as usize
     }
 
-    fn create_pair(entry: u64, ptr: *mut T) -> u128 {
-        ((entry as u128) << 64) | (ptr as u128)
+    fn create_pair(entry: usize, ptr: *mut T) -> DUsize {
+        ((entry as DUsize) << usize::BITS) | (ptr as DUsize)
     }
 
     pub fn enqueue(&self, item: T, lhead: &mut usize) -> EnqueueResult<T> {
@@ -108,10 +111,10 @@ impl<T> SCQ2Ring<T> {
                 if compare_signed(entry_cycle, tail_cycle, cmp::Ordering::Less) && 
                     (entry == entry_cycle || 
                      ((entry == (entry_cycle | 0x2)) && self.head.load(Ordering::Acquire) <= tail)) {
-                        match self.array[tail_index].compare_exchange_weak(pair, Self::create_pair((tail_cycle | 1) as u64, item), Ordering::Acquire, Ordering::Relaxed) {
+                        match self.array[tail_index].compare_exchange_weak(pair, Self::create_pair(tail_cycle | 1, item), Ordering::Acquire, Ordering::Relaxed) {
                             Ok(_) => {
-                                if self.threshold.load(Ordering::Acquire) != (2 * n as isize - 1) {
-                                    self.threshold.store(2 * n as isize - 1, Ordering::Release);
+                                if self.threshold.load(Ordering::Acquire) != Self::threshold4(n) {
+                                    self.threshold.store(Self::threshold4(n), Ordering::Release);
                                 }
                                 return Ok(());
                             },
@@ -186,7 +189,7 @@ impl<T> SCQ2Ring<T> {
                 if !compare_signed(entry_cycle, head_cycle, cmp::Ordering::Less) {
                     break 'inner;
                 }
-                if Self::get_array_entry(&self.array[head_index]).compare_exchange_weak(entry as u64, entry_new as u64, Ordering::Release, Ordering::Relaxed).is_ok() { 
+                if Self::get_array_entry(&self.array[head_index]).compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed).is_ok() { 
                     break 'inner; 
                 }
             }
@@ -226,10 +229,10 @@ impl<T> Queue<T> for SCQ2Cas<T> {
         self.ring.dequeue()
     }
 
-    fn register(&self, _: usize) -> Self::Handle {
-        SCQ2Handle {
+    fn register(&self) -> HandleResult<Self::Handle> {
+        Ok(SCQ2Handle {
             lhead: self.ring.array.len(),
-        }
+        })
     }
 }
 

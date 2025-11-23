@@ -2,7 +2,7 @@ use std::{cell::UnsafeCell, cmp, mem::MaybeUninit, sync::atomic::{AtomicIsize, A
 
 use crossbeam_utils::CachePadded;
 
-use crate::queue::{EnqueueResult, Queue, QueueFull};
+use crate::queue::{EnqueueResult, HandleResult, Queue, QueueFull};
 
 struct SCQRing {
     head: CachePadded<AtomicUsize>,
@@ -19,7 +19,16 @@ fn compare_signed(a: usize, b: usize, oper: cmp::Ordering) -> bool {
     c.cmp(&0) == oper
 }
 
+struct Entry {
+    value: usize
+}
+
 impl SCQRing {
+
+    const fn threshold3(n: usize) -> isize {
+        (n / 2 + n - 1) as isize
+    }
+
     pub fn new_empty(len: usize) -> Self {
         // LEN must be a power of 2
         assert!(len & (len - 1) == 0);
@@ -47,7 +56,7 @@ impl SCQRing {
         }
         Self { 
             head: CachePadded::new(AtomicUsize::new(0)), 
-            threshold: CachePadded::new(AtomicIsize::new(len as isize + n as isize - 1)), 
+            threshold: CachePadded::new(AtomicIsize::new(Self::threshold3(n))), 
             tail: CachePadded::new(AtomicUsize::new(len)), 
             array: data, 
         }
@@ -71,7 +80,7 @@ impl SCQRing {
         }
         Self { 
             head: CachePadded::new(AtomicUsize::new(start)), 
-            threshold: CachePadded::new(AtomicIsize::new(len as isize + n as isize - 1)), 
+            threshold: CachePadded::new(AtomicIsize::new(Self::threshold3(n))), 
             tail: CachePadded::new(AtomicUsize::new(end)), 
             array, 
         }
@@ -80,7 +89,6 @@ impl SCQRing {
     pub fn enqueue(&self, mut elem: usize) {
         let n = self.array.len();
         elem ^= n - 1;
-        let half = n / 2;
         loop {
             let tail = self.tail.fetch_add(1, Ordering::Acquire);
             let tail_cycle = (tail << 1) | (2 * n - 1);
@@ -90,13 +98,15 @@ impl SCQRing {
             // retry:
             'retry: loop {
                 let entry_cycle = entry | (2 * n - 1);
+                // entry == entry_cycle -> is entry empty?
+                // entry == entry_cycle ^ n -> is entry safe?
                 if compare_signed(entry_cycle, tail_cycle, cmp::Ordering::Less) && 
                     (entry == entry_cycle || 
                      ((entry == (entry_cycle ^ n)) && !compare_signed(self.head.load(Ordering::Acquire), tail, cmp::Ordering::Greater))) {
                         match self.array[tail_index].compare_exchange_weak(entry, tail_cycle ^ elem, Ordering::Acquire, Ordering::Relaxed) {
                             Ok(_) => {
-                                if self.threshold.load(Ordering::Acquire) != (half as isize + n as isize - 1) {
-                                    self.threshold.store(half as isize + n as isize - 1, Ordering::Release);
+                                if self.threshold.load(Ordering::Acquire) != Self::threshold3(n) {
+                                    self.threshold.store(Self::threshold3(n), Ordering::Release);
                                 }
                                 return;
                             },
@@ -227,8 +237,8 @@ impl<T> Queue<T> for SCQCas<T> {
         }
     }
 
-    fn register(&self, _: usize) -> Self::Handle {
-        
+    fn register(&self) -> HandleResult<Self::Handle> {
+        Ok(())
     }
 }
 

@@ -1,8 +1,6 @@
 use std::{cell::UnsafeCell, mem::MaybeUninit, sync::Mutex};
 
-use crossbeam_utils::CachePadded;
-
-use crate::queue::{EnqueueResult, Queue, QueueFull};
+use crate::queue::{EnqueueResult, HandleResult, Queue, QueueFull};
 
 pub struct LockQueueInner<T> {
     data: Box<[UnsafeCell<MaybeUninit<T>>]>,
@@ -62,12 +60,12 @@ impl<T> Drop for LockQueueInner<T> {
 }
 
 pub struct LockQueue<T> {
-    inner: CachePadded<Mutex<LockQueueInner<T>>>,
+    inner: Mutex<LockQueueInner<T>>
 }
 
 impl<T> LockQueue<T> {
     pub fn new(len: usize) -> Self {
-        Self { inner: CachePadded::new(Mutex::new(LockQueueInner::new(len))) }
+        Self { inner: Mutex::new(LockQueueInner::new(len)) }
     }
 }
 
@@ -83,8 +81,8 @@ impl<T> Queue<T> for LockQueue<T> {
         inner.dequeue()
     }
 
-    fn register(&self, _: usize) -> Self::Handle {
-        
+    fn register(&self) -> HandleResult<Self::Handle> {
+        Ok(())
     }
 }
 

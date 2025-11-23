@@ -1,12 +1,12 @@
-use std::{marker::PhantomData, ptr, sync::atomic::{AtomicU64, Ordering}};
+use std::{marker::PhantomData, ptr, sync::atomic::Ordering};
 
 use crossbeam_utils::CachePadded;
-use portable_atomic::AtomicU128;
+use portable_atomic::AtomicUsize;
 
-use crate::{queue::{EnqueueResult, Queue, QueueFull}, tagged_ptr::TaggedPtr};
+use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleResult, Queue, QueueFull}, tagged_ptr::TaggedPtr};
 
 pub struct NBLFQTagged<T> {
-    array: Box<[CachePadded<AtomicU64>]>,
+    array: Box<[CachePadded<AtomicUsize>]>,
     _phantom: PhantomData<T>,
 }
 
@@ -18,7 +18,7 @@ pub struct NBLFQHandle {
 impl<T> NBLFQTagged<T> {
     pub fn new(len: usize) -> Self {
         let len = len.next_power_of_two();
-        let array: Box<[CachePadded<AtomicU64>]> = (0..len).map(|_| CachePadded::new(AtomicU64::new(0))).collect();
+        let array: Box<[CachePadded<AtomicUsize>]> = (0..len).map(|_| CachePadded::new(AtomicUsize::new(0))).collect();
         Self { 
             array,
             _phantom: PhantomData
@@ -75,8 +75,8 @@ impl<T> Queue<T> for NBLFQTagged<T> {
             if h == 0 {
                 c = c.wrapping_add(1);
             }
-            let item = u64::from(TaggedPtr::from_raw(item, c));
-            let expected = u64::from(TaggedPtr::<T>::new(None, c));
+            let item = usize::from(TaggedPtr::from_raw(item, c));
+            let expected = usize::from(TaggedPtr::<T>::new(None, c));
             match self.array[h].compare_exchange(expected, item, Ordering::Release, Ordering::Relaxed) {
                 Ok(_) => {
                     handle.head = (h + 1) % self.array.len();
@@ -103,8 +103,8 @@ impl<T> Queue<T> for NBLFQTagged<T> {
                 return None;
             }
             let c = u.tag.wrapping_add(1);
-            let empty = u64::from(TaggedPtr::<T>::new(None, c));
-            match self.array[t].compare_exchange(u64::from(u), empty, Ordering::Release, Ordering::Relaxed) {
+            let empty = usize::from(TaggedPtr::<T>::new(None, c));
+            match self.array[t].compare_exchange(usize::from(u), empty, Ordering::Release, Ordering::Relaxed) {
                 Ok(_) => {
                     handle.tail = (t + 1) % self.array.len();
                     let data = unsafe {
@@ -117,38 +117,38 @@ impl<T> Queue<T> for NBLFQTagged<T> {
         }
     }
 
-    fn register(&self, _: usize) -> Self::Handle {
-        NBLFQHandle {
+    fn register(&self) -> HandleResult<Self::Handle> {
+        Ok(Self::Handle {
             head: 0,
             tail: 0,
-        }
+        })
     }
 }
 
 pub struct NBLFQDCas<T> {
-    array: Box<[CachePadded<AtomicU128>]>,
+    array: Box<[CachePadded<AtomicDUsize>]>,
     _phantom: PhantomData<T>,
 }
 
 struct QueueIndex<T> {
-    counter: u64,
+    counter: usize,
     ptr: *mut T,
     _phantom: PhantomData<T>,
 }
 
-impl<T> From<u128> for QueueIndex<T> {
-    fn from(value: u128) -> Self {
+impl<T> From<DUsize> for QueueIndex<T> {
+    fn from(value: DUsize) -> Self {
         QueueIndex { 
-            counter: ((value >> 64) & u64::MAX as u128) as u64, 
-            ptr: ((value) & u64::MAX as u128) as *mut T, 
+            counter: ((value >> usize::BITS) & usize::MAX as DUsize) as usize, 
+            ptr: ((value) & usize::MAX as DUsize) as *mut T, 
             _phantom: PhantomData,
         }
     }
 }
 
-impl<T> From<QueueIndex<T>> for u128 {
+impl<T> From<QueueIndex<T>> for DUsize {
     fn from(value: QueueIndex<T>) -> Self {
-        ((value.counter as u128) << 64) | value.ptr as u128
+        ((value.counter as DUsize) << usize::BITS) | value.ptr as DUsize
     }
 }
 
@@ -167,7 +167,7 @@ impl<T> Copy for QueueIndex<T> {}
 impl<T> NBLFQDCas<T> {
     pub fn new(len: usize) -> Self {
         let len = len.next_power_of_two();
-        let array: Box<[CachePadded<AtomicU128>]> = (0..len).map(|_| CachePadded::new(AtomicU128::new(0))).collect();
+        let array: Box<[CachePadded<AtomicDUsize>]> = (0..len).map(|_| CachePadded::new(AtomicDUsize::new(0))).collect();
         Self { 
             array,
             _phantom: PhantomData
@@ -182,7 +182,7 @@ impl<T> NBLFQDCas<T> {
         if u.counter == v.counter {
             i < j
         } else {
-            v.counter.wrapping_sub(u.counter) < (u64::MAX / 2 + 1)
+            v.counter.wrapping_sub(u.counter) < (usize::MAX / 2 + 1)
         }
     }
 }
@@ -224,12 +224,12 @@ impl<T> Queue<T> for NBLFQDCas<T> {
             if h == 0 {
                 c = c.wrapping_add(1);
             }
-            let item = u128::from(QueueIndex {
+            let item = DUsize::from(QueueIndex {
                 ptr: item, 
                 counter: c,
                 _phantom: PhantomData,
             });
-            let expected = u128::from(QueueIndex {
+            let expected = DUsize::from(QueueIndex {
                 ptr: ptr::null_mut::<T>(), 
                 counter: c, 
                 _phantom: PhantomData,
@@ -260,12 +260,12 @@ impl<T> Queue<T> for NBLFQDCas<T> {
                 return None;
             }
             let c = u.counter.wrapping_add(1);
-            let empty = u128::from(QueueIndex::<T> {
+            let empty = DUsize::from(QueueIndex::<T> {
                 ptr: ptr::null_mut(), 
                 counter: c,
                 _phantom: PhantomData
             });
-            match self.array[t].compare_exchange(u128::from(u), empty, Ordering::Release, Ordering::Relaxed) {
+            match self.array[t].compare_exchange(DUsize::from(u), empty, Ordering::Release, Ordering::Relaxed) {
                 Ok(_) => {
                     handle.tail = (t + 1) % self.array.len();
                     let data = unsafe {
@@ -278,11 +278,11 @@ impl<T> Queue<T> for NBLFQDCas<T> {
         }
     }
 
-    fn register(&self, _: usize) -> Self::Handle {
-        NBLFQHandle {
+    fn register(&self) -> HandleResult<Self::Handle> {
+        Ok(Self::Handle {
             head: 0,
             tail: 0,
-        }
+        })
     }
 
 }

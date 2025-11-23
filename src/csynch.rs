@@ -1,4 +1,4 @@
-use std::{mem::{self, MaybeUninit}, ptr::{self, NonNull}, sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering}};
+use std::{mem::{self, MaybeUninit}, ptr::{self, NonNull}, sync::atomic::{AtomicBool, AtomicPtr, Ordering}};
 
 use crossbeam_utils::CachePadded;
 
@@ -9,7 +9,7 @@ enum Request<T, F, P2> {
     Complete(T),
 }
 
-struct CSynchNode<P1, P2, R, F> 
+pub struct CSynchNode<P1, P2, R, F> 
     where 
         F: FnOnce(&CCQueue<P1>, P2) -> R
 {

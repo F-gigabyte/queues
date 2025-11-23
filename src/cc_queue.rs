@@ -1,9 +1,8 @@
 use std::{cell::UnsafeCell, mem::{self, MaybeUninit}, ptr::NonNull};
 
 use crossbeam_utils::CachePadded;
-use portable_atomic::AtomicPtr;
 
-use crate::{csynch::{CSynch, CSynchHandle}, queue::{EnqueueResult, Queue, QueueFull}};
+use crate::{csynch::{CSynch, CSynchHandle}, queue::{EnqueueResult, HandleResult, Queue, QueueFull}};
 
 struct Node<T> {
     data: MaybeUninit<T>,
@@ -80,11 +79,11 @@ impl<T> Queue<T> for CCQueue<T> {
         self.deq.apply(&mut handle.deq, self, (), Self::serial_dequeue)
     }
 
-    fn register(&self, _: usize) -> Self::Handle {
-        Self::Handle {
+    fn register(&self) -> HandleResult<Self::Handle> {
+        Ok(Self::Handle {
             enq: CSynchHandle::new(),
             deq: CSynchHandle::new(),
-        }
+        })
     }
 }
 

@@ -1,9 +1,9 @@
-use std::{mem::{self, MaybeUninit}, ptr::{self, NonNull}, sync::{Mutex, atomic::{AtomicPtr, Ordering}}};
+use std::{mem::{self, MaybeUninit}, ptr::{self, NonNull}, sync::{Mutex, atomic::{AtomicPtr, AtomicUsize, Ordering}}};
 
 use crossbeam_utils::CachePadded;
 use hazard::{BoxMemory, Pointers};
 
-use crate::queue::{EnqueueResult, Queue};
+use crate::queue::{EnqueueResult, HandleError, HandleResult, Queue};
 
 struct LockFreeNode<T> {
     value: CachePadded<MaybeUninit<T>>,
@@ -13,6 +13,8 @@ struct LockFreeNode<T> {
 pub struct MSLockFree<T> {
     head: CachePadded<AtomicPtr<LockFreeNode<T>>>,
     tail: CachePadded<AtomicPtr<LockFreeNode<T>>>,
+    current_thread: AtomicUsize,
+    num_threads: usize,
     hazard: Pointers<LockFreeNode<T>, BoxMemory>
 }
 
@@ -29,6 +31,8 @@ impl<T> MSLockFree<T> {
         Self { 
             head: CachePadded::new(AtomicPtr::new(node)),
             tail: CachePadded::new(AtomicPtr::new(node)),
+            current_thread: AtomicUsize::new(0),
+            num_threads,
             hazard: Pointers::new(BoxMemory, num_threads, 2, 2 * num_threads)
         }
     }
@@ -92,9 +96,14 @@ impl<T> Queue<T> for MSLockFree<T> {
         Some(data)
     }
 
-    fn register(&self, thread_id: usize) -> Self::Handle {
-        MSLockFreeHandle {
-            thread_id
+    fn register(&self) -> HandleResult<Self::Handle> {
+        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        if thread_id < self.num_threads {
+            Ok(MSLockFreeHandle {
+                thread_id
+            })
+        } else {
+            Err(HandleError)
         }
     }
 }
@@ -186,8 +195,8 @@ impl<T> Queue<T> for MSLocking<T> {
         Some(data)
     }
 
-    fn register(&self, _: usize) -> Self::Handle {
-        ()
+    fn register(&self) -> HandleResult<Self::Handle> {
+        Ok(())
     }
 }
 
