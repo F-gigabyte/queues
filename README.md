@@ -9,7 +9,7 @@
 8. Locking Queue *
 9. LCRQ *
 10. wCQ *
-11. CR Turn
+11. CR Turn *
 12. WFQ - M & S
 13. FP - SP
 14. WFQ
