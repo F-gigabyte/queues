@@ -1,7 +1,3 @@
-use std::{mem::{self, MaybeUninit}, ptr, sync::atomic::Ordering};
-
-use crossbeam_utils::CachePadded;
-use hazard::{BoxMemory, Pointers};
 /// ******************************************************************************
 /// Copyright (c) 2014-2016, Pedro Ramalhete, Andreia Correia
 /// All rights reserved.
@@ -27,9 +23,13 @@ use hazard::{BoxMemory, Pointers};
 /// ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 /// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 /// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-///*****************************************************************************
+/// *****************************************************************************
 
 use portable_atomic::{AtomicPtr, AtomicUsize};
+use std::{mem::{self, MaybeUninit}, ptr, sync::atomic::Ordering};
+
+use crossbeam_utils::CachePadded;
+use hazard::{BoxMemory, Pointers};
 
 use crate::queue::{EnqueueResult, HandleError, HandleResult, Queue};
 

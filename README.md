@@ -10,10 +10,11 @@
 9. LCRQ *
 10. wCQ *
 11. CR Turn *
-12. WFQ - M & S
+12. WFQ - M & S *
 13. FP - SP
 14. WFQ
 15. RCQB
 16. RCQS
 17. RCQD
-18. LSCQ 
+18. LSCQ (CAS)
+19. LSCQ (DCAS)

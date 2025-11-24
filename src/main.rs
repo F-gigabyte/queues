@@ -1,7 +1,7 @@
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::Instant};
 
 
-use crate::{cc_queue::CCQueue, crturn::CRTurn, lcrq::LCRQ, ms::{MSLockFree, MSLocking}, nblfq::{NBLFQDCas, NBLFQTagged}, queue::Queue, scq_cas::SCQCas, wcq::WCQ};
+use crate::{cc_queue::CCQueue, crturn::CRTurn, lcrq::LCRQ, ms::{MSLockFree, MSLocking}, nblfq::{NBLFQDCas, NBLFQTagged}, queue::Queue, scq_cas::SCQCas, wcq::WCQ, wfq_ms::MSWaitFree};
 
 pub mod queue;
 pub mod lock_queue;
@@ -16,12 +16,13 @@ pub mod lcrq;
 pub mod wcq;
 pub mod atomic_types;
 pub mod crturn;
+pub mod wfq_ms;
 
 fn main() {
     let num_threads = 64;
     let items = Arc::new([10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160]);
     //let queue = LockQueue::new(16);
-    let queue2 = Arc::new(CRTurn::new(num_threads + 1));
+    let queue2 = Arc::new(MSWaitFree::new(num_threads + 1));
 
     let mut threads = Vec::new();
     let begin_tasks = Arc::new(AtomicBool::new(false));
