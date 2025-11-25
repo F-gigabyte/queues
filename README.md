@@ -11,7 +11,7 @@
 10. wCQ *
 11. CR Turn *
 12. WFQ - M & S *
-13. FP - SP
+13. FP - SP *
 14. WFQ
 15. RCQB
 16. RCQS
