@@ -6,4 +6,6 @@ edition = "2024"
 [dependencies]
 crossbeam-utils = "0.8.21"
 hazard = "0.3.1"
+linux-futex = "1.0.0"
 portable-atomic = "1.11.1"
+stackalloc = "1.2.1"

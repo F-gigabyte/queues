@@ -5,8 +5,6 @@ use hazard::{BoxMemory, Pointers};
 
 use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull}};
 
-pub const RING_SIZE: usize = 16;
-
 struct Node<T> {
     index: usize,
     ptr: *mut T,
@@ -250,17 +248,19 @@ pub struct LCRQ<T> {
     tail: CachePadded<AtomicPtr<CRQ<T>>>,
     current_thread: AtomicUsize,
     num_threads: usize,
+    ring_size: usize,
     hazard: Pointers<CRQ<T>, BoxMemory>
 }
 
 impl<T> LCRQ<T> {
-    pub fn new(num_threads: usize) -> Self {
-        let crq = Box::into_raw(Box::new(CRQ::new(RING_SIZE)));
+    pub fn new(ring_size: usize, num_threads: usize) -> Self {
+        let crq = Box::into_raw(Box::new(CRQ::new(ring_size)));
         Self { 
             head: CachePadded::new(AtomicPtr::new(crq)), 
             tail: CachePadded::new(AtomicPtr::new(crq)), 
             hazard: Pointers::new(BoxMemory, num_threads, 1, num_threads * 2),
             num_threads,
+            ring_size,
             current_thread: AtomicUsize::new(0)
         }
     }
@@ -285,7 +285,7 @@ impl<T> Queue<T> for LCRQ<T> {
                     return Ok(())
                 },
                 Err(QueueFull(item2)) => {
-                    let new_crq = Box::into_raw(Box::new(CRQ::with_elem(RING_SIZE, item2)));
+                    let new_crq = Box::into_raw(Box::new(CRQ::with_elem(self.ring_size, item2)));
                     match crq.next.compare_exchange(ptr::null_mut(), new_crq, Ordering::Release, Ordering::Relaxed) {
                         Ok(_) => {
                             _ = self.tail.compare_exchange(crq_ptr, new_crq, Ordering::Release, Ordering::Relaxed);

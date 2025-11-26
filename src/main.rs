@@ -1,7 +1,7 @@
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::Instant};
 
 
-use crate::{cc_queue::CCQueue, crturn::CRTurn, fp_sp::FpSp, lcrq::LCRQ, ms::{MSLockFree, MSLocking}, nblfq::{NBLFQDCas, NBLFQTagged}, queue::Queue, scq_cas::SCQCas, wcq::WCQ, wfq_ms::MSWaitFree};
+use crate::{cc_queue::CCQueue, crturn::CRTurn, fp_sp::FpSp, lcrq::LCRQ, ms::{MSLockFree, MSLocking}, nblfq::{NBLFQDCas, NBLFQTagged}, queue::Queue, rcqb::RCQB, rcqd::RCQD, rcqs::RCQS, scq_cas::SCQCas, wcq::WCQ, wfq::WFQ, wfq_ms::MSWaitFree};
 
 pub mod queue;
 pub mod lock_queue;
@@ -18,12 +18,16 @@ pub mod atomic_types;
 pub mod crturn;
 pub mod wfq_ms;
 pub mod fp_sp;
+pub mod wfq;
+pub mod rcqb;
+pub mod rcqs;
+pub mod rcqd;
 
 fn main() {
-    let num_threads = 16;
+    let num_threads = 64;
     let items = Arc::new([10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160]);
     //let queue = LockQueue::new(16);
-    let queue2 = Arc::new(FpSp::new(num_threads + 1));
+    let queue2 = Arc::new(RCQD::new(items.len() * num_threads));
 
     let mut threads = Vec::new();
     let begin_tasks = Arc::new(AtomicBool::new(false));
@@ -46,7 +50,8 @@ fn main() {
         thread.join().unwrap();
     }
     let mut handle = queue2.register().unwrap();
-    while let Some(item) = queue2.dequeue(&mut handle) {
+    for _ in 0..num_threads * items.len() {
+        let item = queue2.dequeue(&mut handle).unwrap();
         println!("Have item {item:?}");
     }
     let duration = start.elapsed();
