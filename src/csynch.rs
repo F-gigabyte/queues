@@ -9,6 +9,7 @@ enum Request<T, F, P2> {
     Complete(T),
 }
 
+#[derive(Debug)]
 pub struct CSynchNode<P1, P2, R, F> 
     where 
         F: FnOnce(&CCQueue<P1>, P2) -> R
@@ -18,6 +19,7 @@ pub struct CSynchNode<P1, P2, R, F>
     wait: AtomicBool,
 }
 
+#[derive(Debug)]
 pub struct CSynchHandle<P1, P2, R, F> 
         where 
             F: FnOnce(&CCQueue<P1>, P2) -> R
@@ -41,6 +43,7 @@ where
     }
 }
 
+#[derive(Debug)]
 pub struct CSynch<P1, P2, R, F>
 where 
     F: FnOnce(&CCQueue<P1>, P2) -> R

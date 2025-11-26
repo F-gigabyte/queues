@@ -5,11 +5,13 @@ use hazard::{BoxMemory, Pointers};
 
 use crate::queue::{EnqueueResult, HandleError, HandleResult, Queue};
 
+#[derive(Debug)]
 struct LockFreeNode<T> {
     value: CachePadded<MaybeUninit<T>>,
     next: CachePadded<AtomicPtr<LockFreeNode<T>>>,
 }
 
+#[derive(Debug)]
 pub struct MSLockFree<T> {
     head: CachePadded<AtomicPtr<LockFreeNode<T>>>,
     tail: CachePadded<AtomicPtr<LockFreeNode<T>>>,
@@ -18,9 +20,12 @@ pub struct MSLockFree<T> {
     hazard: Pointers<LockFreeNode<T>, BoxMemory>
 }
 
+#[derive(Debug)]
 pub struct MSLockFreeHandle {
     thread_id: usize,
 }
+
+type Handle = MSLockFreeHandle;
 
 impl<T> MSLockFree<T> {
     pub fn new(num_threads: usize) -> Self {
@@ -38,10 +43,8 @@ impl<T> MSLockFree<T> {
     }
 }
 
-impl<T> Queue<T> for MSLockFree<T> {
-    type Handle = MSLockFreeHandle;
-
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T> Queue<T, MSLockFreeHandle> for MSLockFree<T> {
+    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
         let node = Box::into_raw(Box::new(LockFreeNode {
             value: CachePadded::new(MaybeUninit::new(item)),
             next: CachePadded::new(AtomicPtr::new(ptr::null_mut())),
@@ -66,7 +69,7 @@ impl<T> Queue<T> for MSLockFree<T> {
         Ok(())
     }
 
-    fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
         let mut data;
         let mut head;
         let mut next;
@@ -96,7 +99,7 @@ impl<T> Queue<T> for MSLockFree<T> {
         Some(data)
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<Handle> {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
             Ok(MSLockFreeHandle {
@@ -130,11 +133,13 @@ impl<T> Drop for MSLockFree<T> {
 unsafe impl<T> Send for MSLockFree<T> {}
 unsafe impl<T> Sync for MSLockFree<T> {}
 
+#[derive(Debug)]
 pub struct Node<T> {
     value: MaybeUninit<T>,
     next: Option<NonNull<Node<T>>>,
 }
 
+#[derive(Debug)]
 pub struct MSLocking<T> {
     head: CachePadded<Mutex<NonNull<Node<T>>>>,
     tail: CachePadded<Mutex<NonNull<Node<T>>>>,
@@ -154,9 +159,7 @@ impl<T> MSLocking<T> {
 }
 
 impl<T> Queue<T> for MSLocking<T> {
-    type Handle = ();
-    
-    fn enqueue(&self, item: T, _: &mut Self::Handle) -> EnqueueResult<T> {
+    fn enqueue(&self, item: T, _: &mut ()) -> EnqueueResult<T> {
         let node = NonNull::new(Box::into_raw(Box::new(Node {
             value: MaybeUninit::new(item),
             next: None,
@@ -171,7 +174,7 @@ impl<T> Queue<T> for MSLocking<T> {
         Ok(())
     }
 
-    fn dequeue(&self, _: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, _: &mut ()) -> Option<T> {
         let node;
         let data;
         {
@@ -195,7 +198,7 @@ impl<T> Queue<T> for MSLocking<T> {
         Some(data)
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<()> {
         Ok(())
     }
 }

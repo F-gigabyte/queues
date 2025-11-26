@@ -33,6 +33,7 @@ use hazard::{BoxMemory, Pointers};
 
 use crate::queue::{EnqueueResult, HandleError, HandleResult, Queue};
 
+#[derive(Debug)]
 struct Node<T> {
     item: MaybeUninit<T>,
     enq_thread_id: usize,
@@ -60,6 +61,7 @@ impl<T> Node<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct CRTurn<T> {
     head: CachePadded<AtomicPtr<Node<T>>>,
     tail: CachePadded<AtomicPtr<Node<T>>>,
@@ -153,14 +155,15 @@ impl<T> CRTurn<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct CRTurnHandle {
     thread_id: usize
 }
 
-impl<T> Queue<T> for CRTurn<T> {
-    type Handle = CRTurnHandle;
+type Handle = CRTurnHandle;
 
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T> Queue<T, CRTurnHandle> for CRTurn<T> {
+    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
         let thread_id = handle.thread_id;
         let my_node = Box::into_raw(Box::new(Node::new_with(item, handle.thread_id)));
         self.enqueuers[thread_id].store(my_node, Ordering::Release);
@@ -201,7 +204,7 @@ impl<T> Queue<T> for CRTurn<T> {
         Ok(())
     }
     
-    fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
         let thread_id = handle.thread_id;
         let prev_request = self.deq_self[thread_id].load(Ordering::Acquire);
         let my_request = self.deq_help[thread_id].load(Ordering::Acquire);
@@ -254,10 +257,10 @@ impl<T> Queue<T> for CRTurn<T> {
         Some(item)
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<Handle> {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
-            Ok(Self::Handle {
+            Ok(Handle {
                 thread_id,
             })
         } else {

@@ -4,6 +4,7 @@ use crossbeam_utils::CachePadded;
 
 use crate::{csynch::{CSynch, CSynchHandle}, queue::{EnqueueResult, HandleResult, Queue, QueueFull}};
 
+#[derive(Debug)]
 struct Node<T> {
     data: MaybeUninit<T>,
     next: Option<NonNull<Node<T>>>,
@@ -12,11 +13,15 @@ struct Node<T> {
 type EnqueueFunc<T> = fn(&CCQueue<T>, T) -> EnqueueResult<T>;
 type DequeueFunc<T> = fn(&CCQueue<T>, ()) -> Option<T>;
 
+#[derive(Debug)]
 pub struct CCQueueHandle<T> {
     enq: CSynchHandle<T, T, EnqueueResult<T>, EnqueueFunc<T>>,
     deq: CSynchHandle<T, (), Option<T>, DequeueFunc<T>>,
 }
 
+type Handle<T>=CCQueueHandle<T>;
+
+#[derive(Debug)]
 pub struct CCQueue<T> {
     enq: CachePadded<CSynch<T, T, Result<(), QueueFull<T>>, EnqueueFunc<T>>>,
     deq: CachePadded<CSynch<T, (), Option<T>, DequeueFunc<T>>>,
@@ -68,19 +73,17 @@ impl<T> CCQueue<T> {
     }
 }
 
-impl<T> Queue<T> for CCQueue<T> {
-    type Handle = CCQueueHandle<T>;
-
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T> Queue<T, CCQueueHandle<T>> for CCQueue<T> {
+    fn enqueue(&self, item: T, handle: &mut Handle<T>) -> EnqueueResult<T> {
         self.enq.apply(&mut handle.enq, self, item, Self::serial_enqueue)
     }
 
-    fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, handle: &mut Handle<T>) -> Option<T> {
         self.deq.apply(&mut handle.deq, self, (), Self::serial_dequeue)
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
-        Ok(Self::Handle {
+    fn register(&self) -> HandleResult<Handle<T>> {
+        Ok(Handle {
             enq: CSynchHandle::new(),
             deq: CSynchHandle::new(),
         })

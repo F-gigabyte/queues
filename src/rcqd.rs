@@ -2,16 +2,18 @@ use std::{marker::PhantomData, sync::atomic::{AtomicU32, Ordering}};
 
 use crossbeam_utils::CachePadded;
 use linux_futex::{AsFutex, Futex, Private};
-use portable_atomic::{AtomicPtr, AtomicU16, AtomicUsize};
+use portable_atomic::AtomicU16;
 
 use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleResult, Queue}};
 
+#[derive(Debug)]
 struct Slot<T> {
     slot: AtomicDUsize,
     waiters: AtomicU16,
     _phantom: PhantomData<T>
 }
 
+#[derive(Debug)]
 pub struct RCQD<T> {
     slots: Box<[CachePadded<Slot<T>>]>,
     head: AtomicU16,
@@ -87,9 +89,7 @@ impl<T> RCQD<T> {
 }
 
 impl<T> Queue<T> for RCQD<T> {
-    type Handle = ();
-
-    fn enqueue(&self, item: T, _: &mut Self::Handle) -> EnqueueResult<T> {
+    fn enqueue(&self, item: T, _: &mut ()) -> EnqueueResult<T> {
         let item = Box::into_raw(Box::new(item));
         let item = item as DUsize | ((Self::STATE_OCCUPIED as DUsize) << Self::STATE_SHIFT);
         let loc_tail = self.tail.fetch_add(1, Ordering::Acquire) as usize % self.slots.len();
@@ -109,7 +109,7 @@ impl<T> Queue<T> for RCQD<T> {
         }
     }
 
-    fn dequeue(&self, _: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, _: &mut ()) -> Option<T> {
         let loc_head = self.head.fetch_add(1, Ordering::Acquire) as usize % self.slots.len();
         loop {
             let slot = self.slots[loc_head].slot.load(Ordering::Acquire);
@@ -132,7 +132,7 @@ impl<T> Queue<T> for RCQD<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<()> {
         Ok(())
         
     }

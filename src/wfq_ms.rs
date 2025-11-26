@@ -33,6 +33,7 @@ use portable_atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 
 use crate::queue::{EnqueueResult, HandleError, HandleResult, Queue};
 
+#[derive(Debug)]
 struct Node<T> {
     item: MaybeUninit<T>,
     enq_thread_id: usize,
@@ -42,9 +43,12 @@ struct Node<T> {
     retired: CachePadded<AtomicBool>,
 }
 
+#[derive(Debug)]
 pub struct MSWaitFreeHandle {
     thread_id: usize
 }
+
+type Handle = MSWaitFreeHandle;
 
 impl<T> Node<T> {
     const INDEX_NONE: usize = usize::MAX;
@@ -71,6 +75,7 @@ impl<T> Node<T> {
     }
 }
 
+#[derive(Debug)]
 struct OpDesc<T> {
     phase: usize,
     pending: bool,
@@ -78,6 +83,7 @@ struct OpDesc<T> {
     node: *const Node<T>
 }
 
+#[derive(Debug)]
 pub struct MSWaitFree<T> {
     head: CachePadded<AtomicPtr<Node<T>>>,
     tail: CachePadded<AtomicPtr<Node<T>>>,
@@ -396,10 +402,8 @@ impl<T> MSWaitFree<T> {
     }
 }
 
-impl<T> Queue<T> for MSWaitFree<T> {
-    type Handle = MSWaitFreeHandle;
-
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T> Queue<T, MSWaitFreeHandle> for MSWaitFree<T> {
+    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
         let phase = self.get_max_phase(handle.thread_id).wrapping_add(1);
         let node = Box::into_raw(Box::new(Node::with_item(handle.thread_id, item)));
         let op_desc = Box::into_raw(Box::new(OpDesc {
@@ -431,7 +435,7 @@ impl<T> Queue<T> for MSWaitFree<T> {
         Ok(())
     }
 
-    fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
         let phase = self.get_max_phase(handle.thread_id).wrapping_add(1);
         let op_desc = Box::into_raw(Box::new(OpDesc {
             phase,
@@ -508,10 +512,10 @@ impl<T> Queue<T> for MSWaitFree<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<Handle> {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
-            Ok(Self::Handle {
+            Ok(Handle {
                 thread_id
             })
         } else {

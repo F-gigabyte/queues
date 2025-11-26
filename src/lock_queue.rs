@@ -1,7 +1,8 @@
 use std::{cell::UnsafeCell, mem::MaybeUninit, sync::Mutex};
 
-use crate::queue::{EnqueueResult, HandleResult, Queue, QueueFull};
+use crate::{queue::{EnqueueResult, HandleResult, Queue, QueueFull}, ring_buffer::RingBuffer};
 
+#[derive(Debug)]
 pub struct LockQueueInner<T> {
     data: Box<[UnsafeCell<MaybeUninit<T>>]>,
     head: usize,
@@ -59,29 +60,29 @@ impl<T> Drop for LockQueueInner<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct LockQueue<T> {
     inner: Mutex<LockQueueInner<T>>
 }
 
-impl<T> LockQueue<T> {
-    pub fn new(len: usize) -> Self {
+impl<T> RingBuffer<T> for LockQueue<T> {
+    fn new(len: usize) -> Self {
         Self { inner: Mutex::new(LockQueueInner::new(len)) }
     }
 }
 
 impl<T> Queue<T> for LockQueue<T> {
-    type Handle = ();
-    fn enqueue(&self, item: T, _: &mut Self::Handle) -> EnqueueResult<T> {
+    fn enqueue(&self, item: T, _: &mut ()) -> EnqueueResult<T> {
         let mut inner = self.inner.lock().unwrap();
         inner.enqueue(item)
     }
 
-    fn dequeue(&self, _: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, _: &mut ()) -> Option<T> {
         let mut inner = self.inner.lock().unwrap();
         inner.dequeue()
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<()> {
         Ok(())
     }
 }

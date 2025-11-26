@@ -55,28 +55,32 @@ use std::{cell::UnsafeCell, cmp, mem::MaybeUninit, sync::atomic::{AtomicIsize, A
 
 use crossbeam_utils::CachePadded;
 
-use crate::queue::{EnqueueResult, HandleResult, Queue, QueueFull};
+use crate::{lcrq::LCRQ, queue::{EnqueueResult, HandleResult, Queue, QueueFull}, ring_buffer::RingBuffer};
 
-struct SCQRing {
+#[derive(Debug)]
+struct SCQRing<const CLOSABLE: bool> {
     head: CachePadded<AtomicUsize>,
     threshold: CachePadded<AtomicIsize>,
     tail: CachePadded<AtomicUsize>,
     array: Box<[CachePadded<AtomicUsize>]>,
 }
 
-unsafe impl Send for SCQRing {}
-unsafe impl Sync for SCQRing {}
+unsafe impl<const CLOSABLE: bool> Send for SCQRing<CLOSABLE> {}
+unsafe impl<const CLOSABLE: bool> Sync for SCQRing<CLOSABLE> {}
 
 fn compare_signed(a: usize, b: usize, oper: cmp::Ordering) -> bool {
     let c = a as isize - b as isize;
     c.cmp(&0) == oper
 }
 
+#[derive(Debug)]
 struct Entry {
     value: usize
 }
 
-impl SCQRing {
+impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
+    const CLOSED_SHIFT: usize = usize::BITS as usize - 1;
+    const CLOSED_MASK: usize = 1 << Self::CLOSED_SHIFT;
 
     const fn threshold3(n: usize) -> isize {
         (n / 2 + n - 1) as isize
@@ -139,11 +143,16 @@ impl SCQRing {
         }
     }
 
-    pub fn enqueue(&self, mut elem: usize) {
+    pub fn enqueue(&self, mut elem: usize) -> Result<(), QueueFull<()>>{
         let n = self.array.len();
         elem ^= n - 1;
         loop {
             let tail = self.tail.fetch_add(1, Ordering::Acquire);
+            if CLOSABLE {
+                if tail & Self::CLOSED_MASK != 0 {
+                    return Err(QueueFull(()));
+                }
+            }
             let tail_cycle = (tail << 1) | (2 * n - 1);
             let tail_index = tail % n;
             let entry = self.array[tail_index].load(Ordering::Acquire);
@@ -161,7 +170,7 @@ impl SCQRing {
                                 if self.threshold.load(Ordering::Acquire) != Self::threshold3(n) {
                                     self.threshold.store(Self::threshold3(n), Ordering::Release);
                                 }
-                                return;
+                                return Ok(());
                             },
                             Err(_) => {
                                 // goto retry
@@ -246,14 +255,21 @@ impl SCQRing {
     }
 }
 
-pub struct SCQCas<T> {
-    aq: SCQRing,
-    fq: SCQRing,
+impl SCQRing<true> {
+    pub fn close(&self) {
+        _ = self.tail.fetch_or(Self::CLOSED_MASK, Ordering::Release);
+    }
+}
+
+#[derive(Debug)]
+pub struct SCQCas<T, const CLOSABLE: bool> {
+    aq: SCQRing<CLOSABLE>,
+    fq: SCQRing<false>,
     data: Box<[CachePadded<UnsafeCell<MaybeUninit<T>>>]>,
 }
 
-impl<T> SCQCas<T> {
-    pub fn new(len: usize) -> Self {
+impl<T, const CLOSABLE: bool> RingBuffer<T> for SCQCas<T, CLOSABLE> {
+    fn new(len: usize) -> Self {
         let len = len.next_power_of_two();
         let data: Box<[CachePadded<UnsafeCell<MaybeUninit<T>>>]> = (0..len).map(|_| CachePadded::new(UnsafeCell::new(MaybeUninit::uninit()))).collect();
         Self { 
@@ -264,38 +280,46 @@ impl<T> SCQCas<T> {
     }
 }
 
-impl<T> Queue<T> for SCQCas<T> {
-    type Handle = ();
-    fn enqueue(&self, item: T, _: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T, const CLOSABLE: bool> Queue<T> for SCQCas<T, CLOSABLE> {
+    fn enqueue(&self, item: T, _: &mut ()) -> EnqueueResult<T> {
         if let Some(index) = self.fq.dequeue() {
             unsafe {
                 self.data[index].get().write(MaybeUninit::new(item));
             }
-            self.aq.enqueue(index);
+            if CLOSABLE {
+                match self.aq.enqueue(index) {
+                    Ok(_) => {},
+                    Err(_) => {
+                        _ = self.fq.enqueue(index);
+                    },
+                }
+            } else {
+                _ = self.aq.enqueue(index);
+            }
             Ok(())
         } else {
             Err(QueueFull(item))
         }
     }
 
-    fn dequeue(&self, _: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, _: &mut ()) -> Option<T> {
         if let Some(index) = self.aq.dequeue() {
             let val = unsafe {
                 self.data[index].get().read().assume_init()
             };
-            self.fq.enqueue(index);
+            _ = self.fq.enqueue(index);
             Some(val)
         } else {
             None
         }
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<()> {
         Ok(())
     }
 }
 
-impl<T> Drop for SCQCas<T> {
+impl<T, const CLOSABLE: bool> Drop for SCQCas<T, CLOSABLE> {
     fn drop(&mut self) {
         while let Some(index) = self.aq.dequeue() {
             unsafe {
@@ -305,5 +329,7 @@ impl<T> Drop for SCQCas<T> {
     }
 }
 
-unsafe impl<T> Send for SCQCas<T> {}
-unsafe impl<T> Sync for SCQCas<T> {}
+unsafe impl<T, const CLOSABLE: bool> Send for SCQCas<T, CLOSABLE> {}
+unsafe impl<T, const CLOSABLE: bool> Sync for SCQCas<T, CLOSABLE> {}
+
+pub type LSCQ<T> = LCRQ<T, SCQCas<T, true>>;

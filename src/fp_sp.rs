@@ -33,6 +33,7 @@ use portable_atomic::{AtomicBool, AtomicPtr, AtomicU128, AtomicUsize};
 
 use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleError, HandleResult, Queue}};
 
+#[derive(Debug)]
 struct Node<T> {
     item: MaybeUninit<T>,
     enq_thread_id: usize,
@@ -42,10 +43,13 @@ struct Node<T> {
     retired: CachePadded<AtomicBool>,
 }
 
+#[derive(Debug)]
 pub struct FpSpHandle {
     thread_id: usize,
     help_record: HelpRecord,
 }
+
+type Handle = FpSpHandle;
 
 impl<T> Node<T> {
     const INDEX_NONE: usize = usize::MAX;
@@ -72,6 +76,7 @@ impl<T> Node<T> {
     }
 }
 
+#[derive(Debug)]
 struct OpDesc<T> {
     phase: usize,
     pending: bool,
@@ -79,6 +84,7 @@ struct OpDesc<T> {
     node: *const Node<T>
 }
 
+#[derive(Debug)]
 struct HelpRecord {
     current_thread_id: usize,
     last_phase: usize,
@@ -94,6 +100,7 @@ impl HelpRecord {
     }
 }
 
+#[derive(Debug)]
 struct StampedPtr<T> {
     ptr: *mut T,
     stamp: usize,
@@ -141,6 +148,7 @@ impl<T> Clone for StampedPtr<T> {
 
 impl<T> Copy for StampedPtr<T> {}
 
+#[derive(Debug)]
 struct StampedAtomicPtr<T> {
     atomic: AtomicDUsize,
     _phantom: PhantomData<*mut T>,
@@ -197,6 +205,7 @@ impl<T> StampedAtomicPtr<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct FpSp<T> {
     head: CachePadded<StampedAtomicPtr<Node<T>>>,
     tail: CachePadded<AtomicPtr<Node<T>>>,
@@ -667,10 +676,8 @@ impl<T> FpSp<T> {
 
 }
 
-impl<T> Queue<T> for FpSp<T> {
-    type Handle = FpSpHandle;
-
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T> Queue<T, FpSpHandle> for FpSp<T> {
+    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
         self.help_if_needed(handle);
         let node = Box::into_raw(Box::new(Node::with_item(Node::<T>::INDEX_NONE, item)));
         let mut tries = 0;
@@ -699,7 +706,7 @@ impl<T> Queue<T> for FpSp<T> {
         self.slow_enqueue(node, handle)
     }
 
-    fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
         self.help_if_needed(handle);
         let mut tries = 0;
         while tries < Self::MAX_FAILURES {
@@ -750,13 +757,13 @@ impl<T> Queue<T> for FpSp<T> {
     }
 
     
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<Handle> {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
             let last_phase = unsafe {
                 (*self.states[thread_id].load(Ordering::Acquire)).phase
             };
-            Ok(Self::Handle {
+            Ok(Handle {
                 thread_id,
                 help_record: HelpRecord { 
                     current_thread_id: 0, 

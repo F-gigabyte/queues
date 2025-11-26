@@ -5,15 +5,19 @@ use portable_atomic::AtomicUsize;
 
 use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleResult, Queue, QueueFull}, tagged_ptr::TaggedPtr};
 
+#[derive(Debug)]
 pub struct NBLFQTagged<T> {
     array: Box<[CachePadded<AtomicUsize>]>,
     _phantom: PhantomData<T>,
 }
 
+#[derive(Debug)]
 pub struct NBLFQHandle {
     head: usize,
     tail: usize,
 }
+
+type Handle = NBLFQHandle;
 
 impl<T> NBLFQTagged<T> {
     pub fn new(len: usize) -> Self {
@@ -38,10 +42,8 @@ impl<T> NBLFQTagged<T> {
     }
 }
 
-impl<T> Queue<T> for NBLFQTagged<T> {
-    type Handle = NBLFQHandle;
-
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T> Queue<T, NBLFQHandle> for NBLFQTagged<T> {
+    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
         let item = Box::into_raw(Box::new(item));
         loop {
             let mut h = handle.head;
@@ -87,7 +89,7 @@ impl<T> Queue<T> for NBLFQTagged<T> {
         }
     }
     
-    fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
         loop {
             let mut t = handle.tail;
             let mut prev = self.prev(t);
@@ -117,19 +119,21 @@ impl<T> Queue<T> for NBLFQTagged<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
-        Ok(Self::Handle {
+    fn register(&self) -> HandleResult<Handle> {
+        Ok(Handle {
             head: 0,
             tail: 0,
         })
     }
 }
 
+#[derive(Debug)]
 pub struct NBLFQDCas<T> {
     array: Box<[CachePadded<AtomicDUsize>]>,
     _phantom: PhantomData<T>,
 }
 
+#[derive(Debug)]
 struct QueueIndex<T> {
     counter: usize,
     ptr: *mut T,
@@ -187,10 +191,8 @@ impl<T> NBLFQDCas<T> {
     }
 }
 
-impl<T> Queue<T> for NBLFQDCas<T> {
-    type Handle = NBLFQHandle;
-
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T> Queue<T, NBLFQHandle> for NBLFQDCas<T> {
+    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
         let item = Box::into_raw(Box::new(item));
         loop {
             let mut h = handle.head;
@@ -244,7 +246,7 @@ impl<T> Queue<T> for NBLFQDCas<T> {
         }
     }
 
-    fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
         loop {
             let mut t = handle.tail;
             let mut prev = self.prev(t);
@@ -278,8 +280,8 @@ impl<T> Queue<T> for NBLFQDCas<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
-        Ok(Self::Handle {
+    fn register(&self) -> HandleResult<Handle> {
+        Ok(Handle {
             head: 0,
             tail: 0,
         })

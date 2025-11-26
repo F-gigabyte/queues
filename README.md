@@ -16,5 +16,4 @@
 15. RCQB *
 16. RCQS *
 17. RCQD *
-18. LSCQ (CAS)
-19. LSCQ (DCAS)
+18. LSCQ (CAS) *

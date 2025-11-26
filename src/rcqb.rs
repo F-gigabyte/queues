@@ -6,12 +6,14 @@ use portable_atomic::{AtomicU16, AtomicU32};
 
 use crate::queue::{EnqueueResult, HandleResult, Queue};
 
+#[derive(Debug)]
 struct Slot<T> {
     state: Futex<Private>,
     waiters: AtomicU32,
     data: UnsafeCell<MaybeUninit<T>>
 }
 
+#[derive(Debug)]
 pub struct RCQB<T> {
     slots: Box<[CachePadded<Slot<T>>]>,
     head: AtomicU16,
@@ -64,9 +66,7 @@ impl<T> RCQB<T> {
 }
 
 impl<T> Queue<T> for RCQB<T> {
-    type Handle = ();
-
-    fn enqueue(&self, item: T, _: &mut Self::Handle) -> EnqueueResult<T> {
+    fn enqueue(&self, item: T, _: &mut ()) -> EnqueueResult<T> {
         let loc_tail = self.tail.fetch_add(1, Ordering::Acquire) as usize % self.slots.len();
         loop {
             let loc_state = self.slots[loc_tail].state.value.load(Ordering::Acquire);
@@ -87,7 +87,7 @@ impl<T> Queue<T> for RCQB<T> {
         }
     }
 
-    fn dequeue(&self, _: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, _: &mut ()) -> Option<T> {
         let loc_head = self.head.fetch_add(1, Ordering::Acquire) as usize % self.slots.len();
         loop {
             let loc_state = self.slots[loc_head].state.value.load(Ordering::Acquire);
@@ -109,7 +109,7 @@ impl<T> Queue<T> for RCQB<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<()> {
         Ok(())
         
     }

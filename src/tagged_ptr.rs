@@ -1,5 +1,6 @@
 use std::ptr::{self, NonNull};
 
+#[derive(Debug)]
 pub struct TaggedPtr<T> {
    pub ptr: Option<NonNull<T>>,
    pub tag: u16,

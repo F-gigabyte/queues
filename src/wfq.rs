@@ -8,22 +8,26 @@ use stackalloc::stackalloc;
 
 use crate::queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull};
 
+#[derive(Debug)]
 struct EnqRequest<T> {
     val: AtomicPtr<T>,
     state: AtomicIsize,
 }
 
+#[derive(Debug)]
 struct DeqRequest {
     id: AtomicIsize,
     state: AtomicIsize,
 }
 
+#[derive(Debug)]
 struct Cell<T> {
     val: AtomicPtr<T>,
     enq: AtomicPtr<EnqRequest<T>>,
     deq: AtomicPtr<DeqRequest>,
 }
 
+#[derive(Debug)]
 struct Segment<T> {
     id: isize,
     next: CachePadded<AtomicPtr<Segment<T>>>,
@@ -86,11 +90,13 @@ impl<T> Segment<T> {
     }
 }
 
+#[derive(Debug)]
 struct Peer<REQ, T> {
     req: CachePadded<REQ>,
     peer: CachePadded<AtomicPtr<WFQState<T>>>,
 }
 
+#[derive(Debug)]
 pub struct WFQState<T> {
     hazard_node_id: AtomicUsize,
     enqueue_segment: CachePadded<AtomicPtr<Segment<T>>>,
@@ -105,6 +111,7 @@ pub struct WFQState<T> {
     delay: usize,
 }
 
+#[derive(Debug)]
 pub struct WFQ<T> {
     head: CachePadded<AtomicPtr<Segment<T>>>,
     enqueue_index: CachePadded<AtomicIsize>,
@@ -768,14 +775,15 @@ impl<T> WFQ<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct WFQHandle {
     thread_id: usize
 }
 
-impl<T> Queue<T> for WFQ<T> {
-    type Handle = WFQHandle;
+type Handle = WFQHandle;
 
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T> Queue<T, WFQHandle> for WFQ<T> {
+    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
         let item = Box::into_raw(Box::new(item));
         let handle = unsafe {
             &mut *self.handles[handle.thread_id].get()
@@ -797,7 +805,7 @@ impl<T> Queue<T> for WFQ<T> {
         Ok(())
     }
 
-    fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
         let handle = unsafe {
             &mut *self.handles[handle.thread_id].get()
         };
@@ -844,7 +852,7 @@ impl<T> Queue<T> for WFQ<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<Handle> {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
             Ok(WFQHandle {

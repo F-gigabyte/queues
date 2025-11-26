@@ -57,13 +57,14 @@ use crossbeam_utils::CachePadded;
 
 use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleResult, Queue, QueueFull}};
 
+#[derive(Debug)]
 pub struct SCQ2Handle {
     lhead: usize,
 }
 
-unsafe impl Send for SCQ2Handle {}
-unsafe impl Sync for SCQ2Handle {}
+type Handle = SCQ2Handle;
 
+#[derive(Debug)]
 struct SCQ2Ring<T> {
     head: CachePadded<AtomicUsize>,
     threshold: CachePadded<AtomicIsize>,
@@ -259,6 +260,7 @@ impl<T> SCQ2Ring<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct SCQ2Cas<T> {
     ring: SCQ2Ring<T>,
 }
@@ -272,17 +274,16 @@ impl<T> SCQ2Cas<T> {
     }
 }
 
-impl<T> Queue<T> for SCQ2Cas<T> {
-    type Handle = SCQ2Handle;
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T> Queue<T, SCQ2Handle> for SCQ2Cas<T> {
+    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
         self.ring.enqueue(item, &mut handle.lhead)
     }
 
-    fn dequeue(&self, _: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, _: &mut Handle) -> Option<T> {
         self.ring.dequeue()
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<Handle> {
         Ok(SCQ2Handle {
             lhead: self.ring.array.len(),
         })

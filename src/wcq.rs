@@ -67,6 +67,7 @@ fn compare_signed(a: usize, b: usize, oper: cmp::Ordering) -> bool {
     c.cmp(&0) == oper
 }
 
+#[derive(Debug)]
 struct WCQRing {
     head: CachePadded<AtomicDUsize>,
     tail: CachePadded<AtomicDUsize>,
@@ -78,6 +79,7 @@ struct WCQRing {
     num_threads: usize,
 }
 
+#[derive(Debug)]
 struct WCQPhase2 {
     seq1: AtomicUsize,
     local: UnsafeCell<*mut AtomicUsize>,
@@ -96,6 +98,7 @@ impl WCQPhase2 {
     }
 }
 
+#[derive(Debug)]
 struct WCQState {
     next: AtomicPtr<WCQState>,
 
@@ -131,6 +134,7 @@ impl WCQState {
     }
 }
 
+#[derive(Debug)]
 pub struct WCQRingHandle {
     next_check: usize,
     state: *const WCQState,
@@ -667,6 +671,7 @@ impl WCQRing {
 unsafe impl Send for WCQRing {}
 unsafe impl Sync for WCQRing {}
 
+#[derive(Debug)]
 pub struct WCQ<T> {
     aq: WCQRing,
     fq: WCQRing,
@@ -685,15 +690,16 @@ impl<T> WCQ<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct WCQHandle {
     aq_handle: WCQRingHandle,
     fq_handle: WCQRingHandle,
 }
 
-impl<T> Queue<T> for WCQ<T> {
-    type Handle = WCQHandle;
+type Handle = WCQHandle;
 
-    fn enqueue(&self, item: T, handle: &mut Self::Handle) -> EnqueueResult<T> {
+impl<T> Queue<T, WCQHandle> for WCQ<T> {
+    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
         if let Some(index) = self.fq.dequeue(&mut handle.fq_handle) {
             unsafe {
                 self.data[index].get().write(MaybeUninit::new(item));
@@ -705,7 +711,7 @@ impl<T> Queue<T> for WCQ<T> {
         }
     }
 
-    fn dequeue(&self, handle: &mut Self::Handle) -> Option<T> {
+    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
         if let Some(index) = self.aq.dequeue(&mut handle.aq_handle) {
             let val = unsafe {
                 self.data[index].get().read().assume_init()
@@ -717,7 +723,7 @@ impl<T> Queue<T> for WCQ<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<Self::Handle> {
+    fn register(&self) -> HandleResult<Handle> {
         if let Ok(aq_handle) = self.aq.register() {
             let fq_handle = self.fq.register().unwrap();
             Ok(WCQHandle {
