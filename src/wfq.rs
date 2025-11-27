@@ -346,29 +346,26 @@ impl<T> WFQ<T> {
             {
                 return ptr::null_mut();
             }
-        } else {
-            if enqueue_id > 0 {
-                if enq.state.compare_exchange(
-                    enqueue_id,
-                    -i,
+        } else if enqueue_id > 0
+        && enq.state.compare_exchange(
+            enqueue_id,
+            -i,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ).is_ok() {
+            let enqueue_index = self.enqueue_index.load(Ordering::Acquire);
+            loop {
+                if enqueue_index > i {
+                    break;
+                }
+                if self.enqueue_index.compare_exchange(
+                    enqueue_index,
+                    i + 1,
                     Ordering::Release,
                     Ordering::Relaxed,
-                ).is_ok() {
-                    let enqueue_index = self.enqueue_index.load(Ordering::Acquire);
-                    loop {
-                        if enqueue_index > i {
-                            break;
-                        }
-                        if self.enqueue_index.compare_exchange(
-                            enqueue_index,
-                            i + 1,
-                            Ordering::Release,
-                            Ordering::Relaxed,
-                        ).is_ok() { break }
-                    }
-                    cell.val.store(enqueue_val, Ordering::Release);
-                }
+                ).is_ok() { break }
             }
+            cell.val.store(enqueue_val, Ordering::Release);
         }
         cell.val.load(Ordering::Acquire)
     }
