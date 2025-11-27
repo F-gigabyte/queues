@@ -118,7 +118,7 @@ impl<T> CRTurn<T> {
             }
             break;
         }
-        return next.deq_thread_id.load(Ordering::Acquire);
+        next.deq_thread_id.load(Ordering::Acquire)
     }
 
     fn cas_dequeue_and_head(&self, head_ptr: *const Node<T>, next_ptr: *const Node<T>, thread_id: usize) {
@@ -130,7 +130,7 @@ impl<T> CRTurn<T> {
             self.deq_help[deq_thread_id].store(next_ptr as *mut Node<T>, Ordering::Release);
         } else {
             let deq_help = self.hazard.mark_ptr(thread_id, Self::HAZARD_DEQUEUE, self.deq_help[deq_thread_id].load(Ordering::Acquire));
-            if deq_help as *const Node<T> != next_ptr && head_ptr != self.head.load(Ordering::Acquire) {
+            if !std::ptr::eq(deq_help, next_ptr) && head_ptr != self.head.load(Ordering::Acquire) {
                 _ = self.deq_help[deq_thread_id].compare_exchange(deq_help, next_ptr as *mut Node<T>, Ordering::Release, Ordering::Relaxed);
             }
         }
@@ -139,7 +139,7 @@ impl<T> CRTurn<T> {
 
     fn give_up(&self, my_request: *const Node<T>, thread_id: usize) {
         let head = self.head.load(Ordering::Acquire);
-        if self.deq_help[thread_id].load(Ordering::Acquire) as *const Node<T> != my_request || head == self.tail.load(Ordering::Acquire) {
+        if !std::ptr::eq(self.deq_help[thread_id].load(Ordering::Acquire), my_request) || head == self.tail.load(Ordering::Acquire) {
             return;
         }
         let next = self.hazard.mark_ptr(thread_id, Self::HAZARD_NEXT, unsafe {(*head).next.load(Ordering::Acquire)});
@@ -161,7 +161,7 @@ impl<T> Queue<T> for CRTurn<T> {
         let my_node = Box::into_raw(Box::new(Node::new_with(item, thread_id)));
         self.enqueuers[thread_id].store(my_node, Ordering::Release);
         for _ in 0..self.num_threads {
-            if self.enqueuers[thread_id].load(Ordering::Acquire) == ptr::null_mut() {
+            if self.enqueuers[thread_id].load(Ordering::Acquire).is_null() {
                 self.hazard.clear(thread_id, Self::HAZARD_TAIL);
                 self.hazard.clear(thread_id, Self::HAZARD_NEXT);
                 self.hazard.clear(thread_id, Self::HAZARD_DEQUEUE);
@@ -179,7 +179,7 @@ impl<T> Queue<T> for CRTurn<T> {
             }
             for j in 1..self.num_threads + 1 {
                 let node_help = self.enqueuers[(j + tail.enq_thread_id) % self.num_threads].load(Ordering::Acquire);
-                if node_help == ptr::null_mut() {
+                if node_help.is_null() {
                     continue;
                 }
                 _ = tail.next.compare_exchange(ptr::null_mut(), node_help, Ordering::Release, Ordering::Relaxed);

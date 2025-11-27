@@ -140,7 +140,7 @@ impl<T> WFQ<T> {
             dequeue_index: CachePadded::new(AtomicIsize::new(1)),
             head_index: CachePadded::new(AtomicIsize::new(0)),
             handle_tail: CachePadded::new(AtomicPtr::new(handle_tail)),
-            handles: handles,
+            handles,
             current_thread: AtomicUsize::new(0),
             num_threads,
             ring_size,
@@ -188,15 +188,12 @@ impl<T> WFQ<T> {
         let next = tail.next.load(Ordering::Acquire);
         loop {
             handle.next.store(next, Ordering::Release);
-            match tail.next.compare_exchange(
+            if tail.next.compare_exchange(
                 next,
                 handle.as_mut(),
                 Ordering::Release,
                 Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(_) => {}
-            }
+            ).is_ok() { break }
         }
         handle.enq.peer.store(next, Ordering::Release);
         handle.deq.peer.store(next, Ordering::Release);
@@ -250,25 +247,21 @@ impl<T> WFQ<T> {
             i = self.enqueue_index.fetch_add(1, Ordering::Acquire);
             let c;
             (tail, c) = tail.find_cell(i, &mut handle.spare);
-            match c.enq.compare_exchange(
+            if c.enq.compare_exchange(
                 ptr::null_mut(),
                 enq as *const EnqRequest<T> as *mut EnqRequest<T>,
                 Ordering::Release,
                 Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    if c.val.load(Ordering::Acquire) != Self::TOP_ITEM {
-                        _ = enq.state.compare_exchange(
-                            id,
-                            -1,
-                            Ordering::Release,
-                            Ordering::Relaxed,
-                        );
-                        break;
-                    }
+            ).is_ok()
+                && c.val.load(Ordering::Acquire) != Self::TOP_ITEM {
+                    _ = enq.state.compare_exchange(
+                        id,
+                        -1,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    );
+                    break;
                 }
-                Err(_) => {}
-            }
             if enq.state.load(Ordering::Acquire) <= 0 {
                 break;
             }
@@ -284,15 +277,12 @@ impl<T> WFQ<T> {
         if id > i {
             let index = self.enqueue_index.load(Ordering::Acquire);
             while index <= id {
-                match self.enqueue_index.compare_exchange(
+                if self.enqueue_index.compare_exchange(
                     index,
                     id + 1,
                     Ordering::Release,
                     Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(_) => {}
-                }
+                ).is_ok() { break }
             }
         }
         c.val.store(item, Ordering::Release);
@@ -330,19 +320,15 @@ impl<T> WFQ<T> {
                     Ordering::Release,
                 );
             }
-            if enq.is_null() {
-                match cell.enq.compare_exchange(
+            if enq.is_null()
+                && cell.enq.compare_exchange(
                     enq,
                     Self::TOP_ENQUEUE,
                     Ordering::Release,
                     Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        enq = Self::TOP_ENQUEUE;
-                    }
-                    Err(_) => {}
+                ).is_ok() {
+                    enq = Self::TOP_ENQUEUE;
                 }
-            }
         }
         if enq == Self::TOP_ENQUEUE {
             return if self.enqueue_index.load(Ordering::Acquire) <= i {
@@ -362,31 +348,25 @@ impl<T> WFQ<T> {
             }
         } else {
             if enqueue_id > 0 {
-                match enq.state.compare_exchange(
+                if enq.state.compare_exchange(
                     enqueue_id,
                     -i,
                     Ordering::Release,
                     Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        let enqueue_index = self.enqueue_index.load(Ordering::Acquire);
-                        loop {
-                            if enqueue_index > i {
-                                break;
-                            }
-                            match self.enqueue_index.compare_exchange(
-                                enqueue_index,
-                                i + 1,
-                                Ordering::Release,
-                                Ordering::Relaxed,
-                            ) {
-                                Ok(_) => break,
-                                Err(_) => {}
-                            }
+                ).is_ok() {
+                    let enqueue_index = self.enqueue_index.load(Ordering::Acquire);
+                    loop {
+                        if enqueue_index > i {
+                            break;
                         }
-                        cell.val.store(enqueue_val, Ordering::Release);
+                        if self.enqueue_index.compare_exchange(
+                            enqueue_index,
+                            i + 1,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        ).is_ok() { break }
                     }
-                    Err(_) => {}
+                    cell.val.store(enqueue_val, Ordering::Release);
                 }
             }
         }
@@ -422,15 +402,12 @@ impl<T> WFQ<T> {
                     if dequeue_index > i {
                         break;
                     }
-                    match self.dequeue_index.compare_exchange(
+                    if self.dequeue_index.compare_exchange(
                         dequeue_index,
                         i + 1,
                         Ordering::Release,
                         Ordering::Relaxed,
-                    ) {
-                        Ok(_) => break,
-                        Err(_) => {}
-                    }
+                    ).is_ok() { break }
                 }
                 let item = self.help_enqueue(cell, handle1, i);
                 if item.is_null()
@@ -444,14 +421,10 @@ impl<T> WFQ<T> {
             }
 
             if new != 0 {
-                match deq
+                if deq
                     .state
-                    .compare_exchange(index, new, Ordering::Release, Ordering::Relaxed)
-                {
-                    Ok(_) => {
-                        index = new;
-                    }
-                    Err(_) => {}
+                    .compare_exchange(index, new, Ordering::Release, Ordering::Relaxed).is_ok() {
+                    index = new;
                 }
                 if index >= new {
                     new = 0;
@@ -468,24 +441,19 @@ impl<T> WFQ<T> {
                     .state
                     .compare_exchange(index, -index, Ordering::Release, Ordering::Relaxed);
                 break;
-            } else {
-                match cell.deq.compare_exchange(
-                    ptr::null_mut(),
-                    &**deq as *const DeqRequest as *mut DeqRequest,
+            } else if cell.deq.compare_exchange(
+                ptr::null_mut(),
+                &**deq as *const DeqRequest as *mut DeqRequest,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ).is_ok() {
+                _ = deq.state.compare_exchange(
+                    index,
+                    -index,
                     Ordering::Release,
                     Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        _ = deq.state.compare_exchange(
-                            index,
-                            -index,
-                            Ordering::Release,
-                            Ordering::Relaxed,
-                        );
-                        break;
-                    }
-                    Err(_) => {}
-                }
+                );
+                break;
             }
             old = index;
             if index >= i {
@@ -522,15 +490,12 @@ impl<T> WFQ<T> {
                     if dequeue_index > i {
                         break;
                     }
-                    match self.dequeue_index.compare_exchange(
+                    if self.dequeue_index.compare_exchange(
                         dequeue_index,
                         i + 1,
                         Ordering::Release,
                         Ordering::Relaxed,
-                    ) {
-                        Ok(_) => break,
-                        Err(_) => {}
-                    }
+                    ).is_ok() { break }
                 }
                 let item = self.help_enqueue(cell, handle, i);
                 let deq = &handle.deq.req;
@@ -546,14 +511,10 @@ impl<T> WFQ<T> {
 
             let deq = &handle.deq.req;
             if new != 0 {
-                match deq
+                if deq
                     .state
-                    .compare_exchange(index, new, Ordering::Release, Ordering::Relaxed)
-                {
-                    Ok(_) => {
-                        index = new;
-                    }
-                    Err(_) => {}
+                    .compare_exchange(index, new, Ordering::Release, Ordering::Relaxed).is_ok() {
+                    index = new;
                 }
                 if index >= new {
                     new = 0;
@@ -570,24 +531,19 @@ impl<T> WFQ<T> {
                     .state
                     .compare_exchange(index, -index, Ordering::Release, Ordering::Relaxed);
                 break;
-            } else {
-                match cell.deq.compare_exchange(
-                    ptr::null_mut(),
-                    &**deq as *const DeqRequest as *mut DeqRequest,
+            } else if cell.deq.compare_exchange(
+                ptr::null_mut(),
+                &**deq as *const DeqRequest as *mut DeqRequest,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ).is_ok() {
+                _ = deq.state.compare_exchange(
+                    index,
+                    -index,
                     Ordering::Release,
                     Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        _ = deq.state.compare_exchange(
-                            index,
-                            -index,
-                            Ordering::Release,
-                            Ordering::Relaxed,
-                        );
-                        break;
-                    }
-                    Err(_) => {}
-                }
+                );
+                break;
             }
             old = index;
             if index >= i {
@@ -609,19 +565,15 @@ impl<T> WFQ<T> {
         if item.is_null() {
             return ptr::null_mut();
         }
-        if item != Self::TOP_ITEM {
-            match cell.deq.compare_exchange(
+        if item != Self::TOP_ITEM
+            && cell.deq.compare_exchange(
                 ptr::null_mut(),
                 Self::TOP_DEQUEUE,
                 Ordering::Release,
                 Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    return item;
-                }
-                Err(_) => {}
+            ).is_ok() {
+                return item;
             }
-        }
         *id = i;
         Self::TOP_ITEM
     }
@@ -737,7 +689,7 @@ impl<T> WFQ<T> {
                 current_handle = unsafe { &*current_handle.next.load(Ordering::Acquire) };
 
                 if new.id <= head_index
-                    || current_handle as *const WFQState<T> == handle as *const WFQState<T>
+                    || std::ptr::eq(current_handle, handle)
                 {
                     break;
                 }
@@ -763,7 +715,7 @@ impl<T> WFQ<T> {
                 );
                 self.head_index.store(new_id, Ordering::Release);
 
-                while old as *const Segment<T> != new as *const Segment<T> {
+                while !std::ptr::eq(old, new) {
                     let temp = old.next.load(Ordering::Acquire);
                     unsafe {
                         _ = Box::from_raw(old as *mut Segment<T>);

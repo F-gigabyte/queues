@@ -27,6 +27,15 @@ pub struct CSynchHandle<P1, P2, R, F>
     pub next: NonNull<CSynchNode<P1, P2, R, F>>,
 }
 
+impl<P1, P2, R, F> Default for CSynchHandle<P1, P2, R, F>
+where 
+    F: FnOnce(&CCQueue<P1>, P2) -> R
+ {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<P1, P2, R, F> CSynchHandle<P1, P2, R, F> 
 where 
     F: FnOnce(&CCQueue<P1>, P2) -> R
@@ -49,6 +58,15 @@ where
     F: FnOnce(&CCQueue<P1>, P2) -> R
 {
     tail: CachePadded<AtomicPtr<CSynchNode<P1, P2, R, F>>>
+}
+
+impl<P1, P2, R, F> Default for CSynch<P1, P2, R, F>
+where 
+    F: FnOnce(&CCQueue<P1>, P2) -> R
+ {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<P1, P2, R, F> CSynch<P1, P2, R, F>

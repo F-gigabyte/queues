@@ -100,7 +100,7 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
             .map(|v| {
                 CachePadded::new(AtomicDUsize::new(DUsize::from(
                 if v == 0 {
-                    Node::new(v as usize, true, elem)
+                    Node::new(v, true, elem)
                 } else {
                     Node::<T>::from_index(v)
                 })))
@@ -126,10 +126,7 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
                 return;
             }
 
-            match self.tail.compare_exchange(t, h, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => return,
-                Err(_) => {}
-            }
+            if self.tail.compare_exchange(t, h, Ordering::Release, Ordering::Relaxed).is_ok() { return }
         }
     }
 
@@ -137,10 +134,7 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
         if CLOSABLE {
             let tt = t + 1;
             if tries < 10 {
-                match self.tail.compare_exchange(tt, tt | Self::CLOSED_MASK, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => true,
-                    Err(_) => false,
-                }
+                self.tail.compare_exchange(tt, tt | Self::CLOSED_MASK, Ordering::Release, Ordering::Relaxed).is_ok()
             } else {
                 self.tail.fetch_or(Self::CLOSED_MASK, Ordering::Release);
                 true
@@ -172,14 +166,11 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
             let slot = &self.array[t % self.array.len()];
             let node = Node::<T>::from(slot.load(Ordering::Acquire));
             if node.ptr.is_null() && 
-                node.get_index() as usize <= t && 
+                node.get_index() <= t && 
                     (node.is_safe() || self.head.load(Ordering::Acquire) <= t) {
                         let new_node = Node::new(t, true, val);
-                        match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed) {
-                            Ok(_) => {
-                                return Ok(())
-                            },
-                            Err(_) => {},
+                        if slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed).is_ok() {
+                            return Ok(())
                         }
             }
             let h = self.head.load(Ordering::Acquire);
@@ -211,22 +202,16 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
                 if !node.ptr.is_null() {
                     if node.get_index() == h {
                         let new_node = Node::<T>::new(h + self.array.len(), node.is_safe(), ptr::null_mut());
-                        match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed) {
-                            Ok(_) => {
-                                let val = unsafe {
-                                    *Box::from_raw(node.ptr)
-                                };
-                                return Some(val)
-                            },
-                            Err(_) => {},
+                        if slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed).is_ok() {
+                            let val = unsafe {
+                                *Box::from_raw(node.ptr)
+                            };
+                            return Some(val)
                         }
                     }
                 } else {
                     let new_node = Node::<T>::new(h + self.array.len(), node.is_safe(), ptr::null_mut());
-                    match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed) {
-                        Ok(_) => break,
-                        Err(_) => {},
-                    }
+                    if slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed).is_ok() { break }
                 }
             }
             let t = self.tail.load(Ordering::Acquire);

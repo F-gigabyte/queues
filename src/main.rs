@@ -1,7 +1,7 @@
-use std::{env, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread, time::Instant};
+use std::{sync::{atomic::{AtomicBool, Ordering}, Arc}, thread, time::Instant};
 
 
-use crate::{cc_queue::CCQueue, crturn::CRTurn, fp_sp::FpSp, lcrq::LCRQ, lock_queue::LockQueue, ms::{MSLockFree, MSLocking}, nblfq::{NBLFQDCas, NBLFQTagged}, queue::Queue, rcqb::RCQB, rcqd::RCQD, rcqs::RCQS, ring_buffer::RingBuffer, scq_cas::{SCQCas, LSCQ}, wcq::WCQ, wfq::WFQ, wfq_ms::MSWaitFree};
+use crate::{lock_queue::LockQueue, queue::Queue, ring_buffer::RingBuffer};
 
 pub mod queue;
 pub mod lock_queue;
@@ -38,23 +38,23 @@ where
     let mut threads = Vec::new();
     let begin_tasks = Arc::new(AtomicBool::new(false));
     for _ in 0..num_threads {
-        let queue = Arc::clone(&queue);
+        let queue = Arc::clone(queue);
         let begin_tasks = Arc::clone(&begin_tasks);
         threads.push(thread::spawn(move || {
-            let mut handle = queue.register().unwrap();
+            let handle = queue.register().unwrap();
             while !begin_tasks.load(Ordering::Acquire) {
                 std::hint::spin_loop();
             }
             for _ in 0..1000 {
                 loop {
-                    if let Some(_) = queue.dequeue(handle) {
+                    if queue.dequeue(handle).is_some() {
                         break;
                     }
                 }
             }
         }));
     }
-    let mut handle = queue.register().unwrap();
+    let handle = queue.register().unwrap();
     let start = Instant::now();
     begin_tasks.store(true, Ordering::Release);
     for i in 0..num_threads * 1000 {

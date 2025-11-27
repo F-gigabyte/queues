@@ -94,12 +94,9 @@ impl<T> Queue<T> for NBLFQTagged<T> {
             }
             let item = usize::from(TaggedPtr::from_raw(item, c));
             let expected = usize::from(TaggedPtr::<T>::new(None, c));
-            match self.array[h].compare_exchange(expected, item, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => {
-                    handle.head = (h + 1) % self.array.len();
-                    return Ok(());
-                },
-                Err(_) => {},
+            if self.array[h].compare_exchange(expected, item, Ordering::Release, Ordering::Relaxed).is_ok() {
+                handle.head = (h + 1) % self.array.len();
+                return Ok(());
             }
         }
     }
@@ -124,15 +121,12 @@ impl<T> Queue<T> for NBLFQTagged<T> {
             }
             let c = u.tag.wrapping_add(1);
             let empty = usize::from(TaggedPtr::<T>::new(None, c));
-            match self.array[t].compare_exchange(usize::from(u), empty, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => {
-                    handle.tail = (t + 1) % self.array.len();
-                    let data = unsafe {
-                        Box::from_raw(u.ptr.unwrap().as_ptr())
-                    };
-                    return Some(*data);
-                },
-                Err(_) => {},
+            if self.array[t].compare_exchange(usize::from(u), empty, Ordering::Release, Ordering::Relaxed).is_ok() {
+                handle.tail = (t + 1) % self.array.len();
+                let data = unsafe {
+                    Box::from_raw(u.ptr.unwrap().as_ptr())
+                };
+                return Some(*data);
             }
         }
     }
@@ -273,12 +267,9 @@ impl<T> Queue<T> for NBLFQDCas<T> {
                 counter: c, 
                 _phantom: PhantomData,
             });
-            match self.array[h].compare_exchange(expected, item, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => {
-                    handle.head = (h + 1) % self.array.len();
-                    return Ok(());
-                },
-                Err(_) => {},
+            if self.array[h].compare_exchange(expected, item, Ordering::Release, Ordering::Relaxed).is_ok() {
+                handle.head = (h + 1) % self.array.len();
+                return Ok(());
             }
         }
     }
@@ -307,15 +298,12 @@ impl<T> Queue<T> for NBLFQDCas<T> {
                 counter: c,
                 _phantom: PhantomData
             });
-            match self.array[t].compare_exchange(DUsize::from(u), empty, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => {
-                    handle.tail = (t + 1) % self.array.len();
-                    let data = unsafe {
-                        Box::from_raw(u.ptr)
-                    };
-                    return Some(*data);
-                },
-                Err(_) => {},
+            if self.array[t].compare_exchange(DUsize::from(u), empty, Ordering::Release, Ordering::Relaxed).is_ok() {
+                handle.tail = (t + 1) % self.array.len();
+                let data = unsafe {
+                    Box::from_raw(u.ptr)
+                };
+                return Some(*data);
             }
         }
     }

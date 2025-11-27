@@ -96,15 +96,11 @@ impl<T> Queue<T> for RCQD<T> {
         loop {
             let slot = self.slots[loc_tail].slot.load(Ordering::Acquire);
             let loc_state = ((slot & Self::STATE_MASK) >> Self::STATE_SHIFT) as u32;
-            if loc_state == Self::STATE_FREE {
-                match self.slots[loc_tail].slot.compare_exchange(slot, item, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => {
-                        Self::wake_dequeue(&self.slots[loc_tail]);
-                        return Ok(());
-                    },
-                    Err(_) => {},
+            if loc_state == Self::STATE_FREE
+                && self.slots[loc_tail].slot.compare_exchange(slot, item, Ordering::Release, Ordering::Relaxed).is_ok() {
+                    Self::wake_dequeue(&self.slots[loc_tail]);
+                    return Ok(());
                 }
-            }
             std::hint::spin_loop();
         }
     }
@@ -116,14 +112,11 @@ impl<T> Queue<T> for RCQD<T> {
             let loc_state = ((slot & Self::STATE_MASK) >> Self::STATE_SHIFT) as u32;
             let data = slot & !Self::STATE_MASK;
             if loc_state == Self::STATE_OCCUPIED {
-                match self.slots[loc_head].slot.compare_exchange(slot, (Self::STATE_FREE as DUsize) << Self::STATE_SHIFT, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => {
-                        let data = unsafe {
-                            *Box::from_raw(data as *mut T)
-                        };
-                        return Some(data);
-                    },
-                    Err(_) => {},
+                if self.slots[loc_head].slot.compare_exchange(slot, (Self::STATE_FREE as DUsize) << Self::STATE_SHIFT, Ordering::Release, Ordering::Relaxed).is_ok() {
+                    let data = unsafe {
+                        *Box::from_raw(data as *mut T)
+                    };
+                    return Some(data);
                 }
             } else if loc_state == Self::STATE_FREE {
                 Self::wait_enqueue(&self.slots[loc_head], Self::STATE_FREE);

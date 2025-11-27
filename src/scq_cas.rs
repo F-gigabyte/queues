@@ -148,11 +148,10 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
         elem ^= n - 1;
         loop {
             let tail = self.tail.fetch_add(1, Ordering::Acquire);
-            if CLOSABLE {
-                if tail & Self::CLOSED_MASK != 0 {
+            if CLOSABLE
+                && tail & Self::CLOSED_MASK != 0 {
                     return Err(QueueFull(()));
                 }
-            }
             let tail_cycle = (tail << 1) | (2 * n - 1);
             let tail_index = tail % n;
             let entry = self.array[tail_index].load(Ordering::Acquire);

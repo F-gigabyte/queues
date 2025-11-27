@@ -104,7 +104,7 @@ impl<T> MSWaitFree<T> {
         Self { 
             head: CachePadded::new(AtomicPtr::new(sentinal)), 
             tail: CachePadded::new(AtomicPtr::new(sentinal)), 
-            states: states, 
+            states, 
             hazard_ops: Pointers::new(BoxMemory, num_threads, 2, num_threads * 2), 
             hazard_nodes: Pointers::new(BoxMemory, num_threads, 3, num_threads * 2),
             opdesc_end,
@@ -204,8 +204,8 @@ impl<T> MSWaitFree<T> {
                 let last = unsafe {
                     &*last
                 };
-                if next.is_null() {
-                    if self.is_pending(query_id, phase, thread_id) {
+                if next.is_null()
+                    && self.is_pending(query_id, phase, thread_id) {
                         let current_desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::Acquire));
                         if current_desc != self.states[query_id].load(Ordering::Acquire) {
                             continue;
@@ -213,15 +213,11 @@ impl<T> MSWaitFree<T> {
                         let current_desc = unsafe {
                             &*current_desc
                         };
-                        match last.next.compare_exchange(next, current_desc.node as *mut Node<T>, Ordering::Release, Ordering::Relaxed) {
-                            Ok(_) => {
-                                self.help_finish_enq(thread_id);
-                                return;
-                            },
-                            Err(_) => {},
+                        if last.next.compare_exchange(next, current_desc.node as *mut Node<T>, Ordering::Release, Ordering::Relaxed).is_ok() {
+                            self.help_finish_enq(thread_id);
+                            return;
                         }
                     }
-                }
             } else {
                 self.help_finish_enq(thread_id);
             }
@@ -415,13 +411,10 @@ impl<T> Queue<T> for MSWaitFree<T> {
         self.hazard_nodes.clear(handle, Self::HAZARD_PTR_PREV);
         let mut desc = self.states[handle].load(Ordering::Acquire);
         for _ in 0..self.num_threads * 2 {
-            if desc == self.opdesc_end as *mut OpDesc<T> {
+            if std::ptr::eq(desc, self.opdesc_end) {
                 break;
             }
-            match self.states[handle].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(_) => {},
-            }
+            if self.states[handle].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed).is_ok() { break }
             desc = self.states[handle].load(Ordering::Acquire);
         }
         self.hazard_ops.retire(handle, desc);
@@ -451,12 +444,9 @@ impl<T> Queue<T> for MSWaitFree<T> {
             self.hazard_nodes.clear(handle, Self::HAZARD_PTR_PREV);
             let mut desc = self.states[handle].load(Ordering::Acquire);
             for _ in 0..self.num_threads {
-                match self.states[handle].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => break,
-                    Err(_) => {},
-                }
+                if self.states[handle].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed).is_ok() { break }
                 desc = self.states[handle].load(Ordering::Acquire);
-                if desc == self.opdesc_end as *mut OpDesc<T> {
+                if std::ptr::eq(desc, self.opdesc_end) {
                     break;
                 }
             }
@@ -491,13 +481,10 @@ impl<T> Queue<T> for MSWaitFree<T> {
             }
             let mut desc = self.states[handle].load(Ordering::Acquire);
             for _ in 0..self.num_threads * 2 {
-                if desc == self.opdesc_end as *mut OpDesc<T> {
+                if std::ptr::eq(desc, self.opdesc_end) {
                     break;
                 }
-                match self.states[handle].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => break,
-                    Err(_) => {},
-                }
+                if self.states[handle].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed).is_ok() { break }
                 desc = self.states[handle].load(Ordering::Acquire);
             }
             self.hazard_ops.retire(handle, desc);

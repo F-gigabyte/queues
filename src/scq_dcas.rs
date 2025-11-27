@@ -155,21 +155,20 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
         }
         loop {
             let tail = self.tail.fetch_add(1, Ordering::Acquire);
-            if CLOSABLE {
-                if tail & Self::CLOSED_MASK != 0 {
+            if CLOSABLE
+                && tail & Self::CLOSED_MASK != 0 {
                     let item = unsafe {
                         *Box::from_raw(item)
                     };
                     return Err(QueueFull(item));
                 }
-            }
             let tail_cycle = tail & !(n - 1);
             let tail_index = tail % n;
             let pair = self.array[tail_index].load(Ordering::Acquire);
 
             // retry:
             'retry: loop {
-                let entry = Self::get_entry(pair) as usize;
+                let entry = Self::get_entry(pair);
                 let entry_cycle = entry & !(n - 1);
                 if compare_signed(entry_cycle, tail_cycle, cmp::Ordering::Less) && 
                     (entry == entry_cycle || 
@@ -228,7 +227,7 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
             let head = self.head.fetch_add(1, Ordering::Acquire);
             let head_cycle = head & !(n - 1);
             let head_index = head % n;
-            let entry = Self::get_array_entry(&self.array[head_index]).load(Ordering::Acquire) as usize;
+            let entry = Self::get_array_entry(&self.array[head_index]).load(Ordering::Acquire);
             let mut entry_new;
             'inner: loop {
                 let entry_cycle = entry & !(n - 1);

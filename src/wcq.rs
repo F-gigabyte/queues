@@ -201,7 +201,7 @@ impl WCQRing {
         let array: Box<[CachePadded<AtomicDUsize>]> = (0..n).map(|index| {
             CachePadded::new(AtomicDUsize::new(
                     if index < len {
-                        Self::create_pair((3 * n + index % len) as usize, usize::MAX)
+                        Self::create_pair(3 * n + index % len, usize::MAX)
                     } else {
                         Self::create_pair(usize::MAX, (-(n as isize) - 1) as usize)
                     }
@@ -211,7 +211,7 @@ impl WCQRing {
         let handles: Box<[CachePadded<UnsafeCell<WCQRingHandle>>]> = (0..num_threads).map(|i| CachePadded::new(UnsafeCell::new(Self::create_handle(i, &states, &handle_tail)))).collect();
         Self {
             head: CachePadded::new(AtomicDUsize::new(0)),
-            tail: CachePadded::new(AtomicDUsize::new(Self::create_pair(len as usize * 4, 0))),
+            tail: CachePadded::new(AtomicDUsize::new(Self::create_pair(len * 4, 0))),
             array,
             threshold: CachePadded::new(AtomicIsize::new(len as isize + n as isize - 1)),
             states,
@@ -274,10 +274,7 @@ impl WCQRing {
                 let count_inc = count + WCQ_INC;
                 _ = local.compare_exchange(count_inc, count, Ordering::Release, Ordering::Relaxed);
             }
-            match global.compare_exchange(global_val, Self::create_pair(Self::get_entry(global_val), 0), Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(_) => {},
-            }
+            if global.compare_exchange(global_val, Self::create_pair(Self::get_entry(global_val), 0), Ordering::Release, Ordering::Relaxed).is_ok() { break }
         }
         Self::get_entry(global_val)
     }
@@ -325,7 +322,7 @@ impl WCQRing {
         global_val = Self::create_pair(count + 1, phase2 as *const WCQPhase2 as usize);
         let _ = global.compare_exchange(global_val, Self::create_pair(count + 1, 0), Ordering::Release, Ordering::Relaxed);
         *prev = count;
-        return true;
+        true
     }
 
     fn do_enqueue_slow(&self, index: usize, seq: usize, mut tail: usize, state: &WCQState) {
@@ -352,11 +349,8 @@ impl WCQRing {
                             }
 
                             entry = tail_cycle ^ index;
-                            match state.tail.compare_exchange(tail, tail + 1, Ordering::Release, Ordering::Relaxed) {
-                                Ok(_) => {
-                                    _ = Self::get_array_entry(&self.array[tail_index]).compare_exchange(entry, entry ^ n, Ordering::Release, Ordering::Relaxed);
-                                },
-                                Err(_) => {},
+                            if state.tail.compare_exchange(tail, tail + 1, Ordering::Release, Ordering::Relaxed).is_ok() {
+                                _ = Self::get_array_entry(&self.array[tail_index]).compare_exchange(entry, entry ^ n, Ordering::Release, Ordering::Relaxed);
                             }
 
                             if self.threshold.load(Ordering::Acquire) != (n + half - 1) as isize {
@@ -397,7 +391,7 @@ impl WCQRing {
         if index <= WCQState::INDEX_DEQUEUE || state.seq1.load(Ordering::Acquire) != seq {
             return;
         }
-        _ = self.do_enqueue_slow(index, seq, tail, state);
+        self.do_enqueue_slow(index, seq, tail, state);;
     }
 
     fn help(&self, handle: &mut WCQRingHandle) {
@@ -441,10 +435,7 @@ impl WCQRing {
 
     fn catchup(&self, mut tail: usize, mut head: usize) {
         loop {
-            match Self::get_array_entry(&self.tail).compare_exchange_weak(tail, head, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(_) => {},
-            }
+            if Self::get_array_entry(&self.tail).compare_exchange_weak(tail, head, Ordering::Release, Ordering::Relaxed).is_ok() { break }
             head = Self::get_array_entry(&self.head).load(Ordering::Acquire);
             tail = Self::get_array_entry(&self.tail).load(Ordering::Acquire);
             if !compare_signed(tail, head, cmp::Ordering::Less) {
@@ -486,10 +477,7 @@ impl WCQRing {
                 if !compare_signed(entry_cycle, head_cycle, cmp::Ordering::Less) {
                     break;
                 }
-                match self.array[head_index].compare_exchange_weak(pair, Self::create_pair(entry_new, note), Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => break,
-                    Err(_) => {},
-                }
+                if self.array[head_index].compare_exchange_weak(pair, Self::create_pair(entry_new, note), Ordering::Release, Ordering::Relaxed).is_ok() { break }
             }
             let tail = Self::get_array_entry(&self.tail).load(Ordering::Acquire);
             if !compare_signed(tail, head + 4, cmp::Ordering::Greater) {
@@ -624,10 +612,7 @@ impl WCQRing {
                 if compare_signed(entry_cycle, head_cycle, cmp::Ordering::Less) {
                     break;
                 }
-                match Self::get_array_entry(&self.array[head_index]).compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => break,
-                    Err(_) => {},
-                }
+                if Self::get_array_entry(&self.array[head_index]).compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed).is_ok() { break }
             }
             let tail = Self::get_array_entry(&self.tail).load(Ordering::Acquire);
             if !compare_signed(tail, head + 4, cmp::Ordering::Greater) {
@@ -651,14 +636,11 @@ impl WCQRing {
         let tail_ptr = handle_tail.load(Ordering::Acquire);
         if tail_ptr.is_null() {
             state.next.store(state_ptr, Ordering::Release);
-            match handle_tail.compare_exchange(tail_ptr, state_ptr, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => return WCQRingHandle {
-                    next_check: WCQ_DELAY,
-                    state: state_ptr as *const WCQState,
-                    current_thread: state_ptr as *const WCQState,
-                },
-                Err(_) => {},
-            }
+            if handle_tail.compare_exchange(tail_ptr, state_ptr, Ordering::Release, Ordering::Relaxed).is_ok() { return WCQRingHandle {
+                next_check: WCQ_DELAY,
+                state: state_ptr as *const WCQState,
+                current_thread: state_ptr as *const WCQState,
+            } }
         }
         let tail = unsafe {
             &*tail_ptr
@@ -666,10 +648,7 @@ impl WCQRing {
         let next = tail.next.load(Ordering::Acquire);
         loop {
             state.next.store(next, Ordering::Release);
-            match tail.next.compare_exchange_weak(next, state_ptr, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(_) => {},
-            }
+            if tail.next.compare_exchange_weak(next, state_ptr, Ordering::Release, Ordering::Relaxed).is_ok() { break }
         }
         WCQRingHandle {
             next_check: WCQ_DELAY,

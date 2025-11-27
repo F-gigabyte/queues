@@ -70,19 +70,15 @@ impl<T> Queue<T> for RCQB<T> {
         let loc_tail = self.tail.fetch_add(1, Ordering::Acquire) as usize % self.slots.len();
         loop {
             let loc_state = self.slots[loc_tail].state.value.load(Ordering::Acquire);
-            if loc_state == Self::STATE_FREE {
-                match self.slots[loc_tail].state.value.compare_exchange(loc_state, Self::STATE_ENQ_PENDING, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => {
-                        unsafe {
-                            self.slots[loc_tail].data.get().write(MaybeUninit::new(item));
-                        }
-                        self.slots[loc_tail].state.value.store(Self::STATE_OCCUPIED, Ordering::Release);
-                        Self::wake_dequeue(&self.slots[loc_tail]);
-                        return Ok(())
-                    },
-                    Err(_) => {},
+            if loc_state == Self::STATE_FREE
+                && self.slots[loc_tail].state.value.compare_exchange(loc_state, Self::STATE_ENQ_PENDING, Ordering::Release, Ordering::Relaxed).is_ok() {
+                    unsafe {
+                        self.slots[loc_tail].data.get().write(MaybeUninit::new(item));
+                    }
+                    self.slots[loc_tail].state.value.store(Self::STATE_OCCUPIED, Ordering::Release);
+                    Self::wake_dequeue(&self.slots[loc_tail]);
+                    return Ok(())
                 }
-            }
             std::hint::spin_loop();
         }
     }
@@ -92,15 +88,12 @@ impl<T> Queue<T> for RCQB<T> {
         loop {
             let loc_state = self.slots[loc_head].state.value.load(Ordering::Acquire);
             if loc_state == Self::STATE_OCCUPIED {
-                match self.slots[loc_head].state.value.compare_exchange(Self::STATE_OCCUPIED, Self::STATE_DEQ_PENDING, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => {
-                        let data = unsafe {
-                            std::mem::replace(&mut *self.slots[loc_head].data.get(), MaybeUninit::uninit()).assume_init()
-                        };
-                        self.slots[loc_head].state.value.store(Self::STATE_FREE, Ordering::Release);
-                        return Some(data);
-                    },
-                    Err(_) => {},
+                if self.slots[loc_head].state.value.compare_exchange(Self::STATE_OCCUPIED, Self::STATE_DEQ_PENDING, Ordering::Release, Ordering::Relaxed).is_ok() {
+                    let data = unsafe {
+                        std::mem::replace(&mut *self.slots[loc_head].data.get(), MaybeUninit::uninit()).assume_init()
+                    };
+                    self.slots[loc_head].state.value.store(Self::STATE_FREE, Ordering::Release);
+                    return Some(data);
                 }
             } else if loc_state == Self::STATE_FREE {
                 Self::wait_enqueue(&self.slots[loc_head], Self::STATE_FREE);

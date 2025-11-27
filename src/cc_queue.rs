@@ -49,7 +49,7 @@ impl<T> CCQueue<T> {
         }
     }
 
-    fn serial_enqueue(self: &Self, item: T) -> EnqueueResult<T> {
+    fn serial_enqueue(&self, item: T) -> EnqueueResult<T> {
         let node = NonNull::new(Box::into_raw(Box::new(Node {
             data: MaybeUninit::new(item),
             next: None,
@@ -61,7 +61,7 @@ impl<T> CCQueue<T> {
         Ok(())
     }
 
-    fn serial_dequeue(self: &Self, _: ()) -> Option<T> {
+    fn serial_dequeue(&self, _: ()) -> Option<T> {
         let next = unsafe {
             (*(*self.head.get()).as_ptr()).next
         };

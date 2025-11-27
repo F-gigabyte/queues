@@ -52,11 +52,11 @@ impl<T> Queue<T> for MSLockFree<T> {
             }
 
             if !next.is_null() {
-                if let Ok(_) = self.tail.compare_exchange(tail, next, Ordering::Release, Ordering::Relaxed) {}
+                _ = self.tail.compare_exchange(tail, next, Ordering::Release, Ordering::Relaxed);
                 continue;
             }
             unsafe {
-                if let Ok(_) = (*tail).next.compare_exchange(next, node, Ordering::Acquire, Ordering::Relaxed) { break }
+                if (*tail).next.compare_exchange(next, node, Ordering::Acquire, Ordering::Relaxed).is_ok() { break }
             }
         }
         Ok(())
@@ -78,13 +78,11 @@ impl<T> Queue<T> for MSLockFree<T> {
                self.hazard.clear(handle, 1);
                return None
            }
-           if head == tail {
-               if let Ok(_) = self.tail.compare_exchange(tail, next, Ordering::Release, Ordering::Relaxed) {}
-           }
+           if head == tail { self.tail.compare_exchange(tail, next, Ordering::Release, Ordering::Relaxed).is_ok(); }
            data = unsafe {
                mem::replace(&mut (*(*next).value), MaybeUninit::uninit()).assume_init()
            };
-           if let Ok(_) = self.head.compare_exchange(head, next, Ordering::Release, Ordering::Relaxed) { break }
+           if self.head.compare_exchange(head, next, Ordering::Release, Ordering::Relaxed).is_ok() { break }
         }
         self.hazard.clear(handle, 0);
         self.hazard.clear(handle, 1);
@@ -134,6 +132,12 @@ pub struct Node<T> {
 pub struct MSLocking<T> {
     head: CachePadded<Mutex<NonNull<Node<T>>>>,
     tail: CachePadded<Mutex<NonNull<Node<T>>>>,
+}
+
+impl<T> Default for MSLocking<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T> MSLocking<T> {

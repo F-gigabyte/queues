@@ -239,7 +239,7 @@ impl<T> FpSp<T> {
         Self { 
             head: CachePadded::new(StampedAtomicPtr::new(StampedPtr::new(sentinal, usize::MAX))), 
             tail: CachePadded::new(AtomicPtr::new(sentinal)), 
-            states: states, 
+            states, 
             hazard_ops: Pointers::new(BoxMemory, num_threads, 2, num_threads * 2), 
             hazard_nodes: Pointers::new(BoxMemory, num_threads, 3, num_threads * 2),
             opdesc_end,
@@ -340,8 +340,8 @@ impl<T> FpSp<T> {
                 let last = unsafe {
                     &*last
                 };
-                if next.is_null() {
-                    if self.is_pending(query_id, phase, thread_id) {
+                if next.is_null()
+                    && self.is_pending(query_id, phase, thread_id) {
                         let current_desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::Acquire));
                         if current_desc != self.states[query_id].load(Ordering::Acquire) {
                             continue;
@@ -349,15 +349,11 @@ impl<T> FpSp<T> {
                         let current_desc = unsafe {
                             &*current_desc
                         };
-                        match last.next.compare_exchange(next, current_desc.node as *mut Node<T>, Ordering::Release, Ordering::Relaxed) {
-                            Ok(_) => {
-                                self.help_finish_enq(thread_id);
-                                return;
-                            },
-                            Err(_) => {},
+                        if last.next.compare_exchange(next, current_desc.node as *mut Node<T>, Ordering::Release, Ordering::Relaxed).is_ok() {
+                            self.help_finish_enq(thread_id);
+                            return;
                         }
                     }
-                }
             } else {
                 self.help_finish_enq(thread_id);
             }
@@ -575,13 +571,10 @@ impl<T> FpSp<T> {
         self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
         let mut desc = self.states[handle.thread_id].load(Ordering::Acquire);
         for _ in 0..self.num_threads * 2 {
-            if desc == self.opdesc_end as *mut OpDesc<T> {
+            if std::ptr::eq(desc, self.opdesc_end) {
                 break;
             }
-            match self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(_) => {},
-            }
+            if self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed).is_ok() { break }
             desc = self.states[handle.thread_id].load(Ordering::Acquire);
         }
         self.hazard_ops.retire(handle.thread_id, desc);
@@ -615,12 +608,9 @@ impl<T> FpSp<T> {
             self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
             let mut desc = self.states[handle.thread_id].load(Ordering::Acquire);
             for _ in 0..self.num_threads {
-                match self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => break,
-                    Err(_) => {},
-                }
+                if self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed).is_ok() { break }
                 desc = self.states[handle.thread_id].load(Ordering::Acquire);
-                if desc == self.opdesc_end as *mut OpDesc<T> {
+                if std::ptr::eq(desc, self.opdesc_end) {
                     break;
                 }
             }
@@ -655,13 +645,10 @@ impl<T> FpSp<T> {
             }
             let mut desc = self.states[handle.thread_id].load(Ordering::Acquire);
             for _ in 0..self.num_threads * 2 {
-                if desc == self.opdesc_end as *mut OpDesc<T> {
+                if std::ptr::eq(desc, self.opdesc_end) {
                     break;
                 }
-                match self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => break,
-                    Err(_) => {},
-                }
+                if self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed).is_ok() { break }
                 desc = self.states[handle.thread_id].load(Ordering::Acquire);
             }
             self.hazard_ops.retire(handle.thread_id, desc);
@@ -709,13 +696,10 @@ impl<T> Queue<T> for FpSp<T> {
             let next = self.hazard_nodes.mark_ptr(handle.thread_id, Self::HAZARD_PTR_NEXT, last.next.load(Ordering::Acquire));
             if last_ptr == self.tail.load(Ordering::Acquire) {
                 if next.is_null() {
-                    match last.next.compare_exchange(next, node, Ordering::Release, Ordering::Relaxed) {
-                        Ok(_) => {
-                            _ = self.tail.compare_exchange(last_ptr, node, Ordering::Release, Ordering::Relaxed);
-                            self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
-                            return Ok(());
-                        },
-                        Err(_) => {},
+                    if last.next.compare_exchange(next, node, Ordering::Release, Ordering::Relaxed).is_ok() {
+                        _ = self.tail.compare_exchange(last_ptr, node, Ordering::Release, Ordering::Relaxed);
+                        self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
+                        return Ok(());
                     }
                 } else {
                     self.fix_tail(last_ptr, next, handle.thread_id);
@@ -751,24 +735,21 @@ impl<T> Queue<T> for FpSp<T> {
                     let next = unsafe {
                         &mut *next_ptr
                     };
-                    match self.head.compare_exchange(StampedPtr::new(first_ptr, Node::<T>::INDEX_NONE), StampedPtr::new(next_ptr, Node::<T>::INDEX_NONE), Ordering::Release, Ordering::Relaxed) {
-                        Ok(_) => {
-                            let val = unsafe {
-                                mem::replace(&mut next.item, MaybeUninit::uninit()).assume_init()
-                            };
-                            next.can_delete.store(true, Ordering::Release);
-                            if next.retired.load(Ordering::Acquire) {
-                                self.hazard_nodes.retire(handle.thread_id, next_ptr);
-                            }
-                            self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
-                            self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
-                            first.retired.store(true, Ordering::Release);
-                            if first.can_delete.load(Ordering::Acquire) {
-                                self.hazard_nodes.retire(handle.thread_id, first_ptr);
-                            }
-                            return Some(val);
-                        },
-                        Err(_) => {},
+                    if self.head.compare_exchange(StampedPtr::new(first_ptr, Node::<T>::INDEX_NONE), StampedPtr::new(next_ptr, Node::<T>::INDEX_NONE), Ordering::Release, Ordering::Relaxed).is_ok() {
+                        let val = unsafe {
+                            mem::replace(&mut next.item, MaybeUninit::uninit()).assume_init()
+                        };
+                        next.can_delete.store(true, Ordering::Release);
+                        if next.retired.load(Ordering::Acquire) {
+                            self.hazard_nodes.retire(handle.thread_id, next_ptr);
+                        }
+                        self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
+                        self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
+                        first.retired.store(true, Ordering::Release);
+                        if first.can_delete.load(Ordering::Acquire) {
+                            self.hazard_nodes.retire(handle.thread_id, first_ptr);
+                        }
+                        return Some(val);
                     }
                 } else {
                     self.help_finish_deq(handle.thread_id);
