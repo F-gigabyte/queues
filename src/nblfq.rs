@@ -3,12 +3,14 @@ use std::{cell::UnsafeCell, marker::PhantomData, ptr, sync::atomic::Ordering};
 use crossbeam_utils::CachePadded;
 use portable_atomic::AtomicUsize;
 
-use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleResult, Queue, QueueFull}, tagged_ptr::TaggedPtr};
+use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull}, tagged_ptr::TaggedPtr};
 
 #[derive(Debug)]
 pub struct NBLFQTagged<T> {
     array: Box<[CachePadded<AtomicUsize>]>,
     handles: Box<[CachePadded<UnsafeCell<NBLFQHandle>>]>,
+    current_thread: AtomicUsize,
+    num_threads: usize,
     _phantom: PhantomData<T>,
 }
 
@@ -18,14 +20,16 @@ pub struct NBLFQHandle {
     tail: usize,
 }
 
-type Handle = NBLFQHandle;
-
 impl<T> NBLFQTagged<T> {
-    pub fn new(len: usize) -> Self {
+    pub fn new(len: usize, num_threads: usize) -> Self {
         let len = len.next_power_of_two();
         let array: Box<[CachePadded<AtomicUsize>]> = (0..len).map(|_| CachePadded::new(AtomicUsize::new(0))).collect();
+        let handles: Box<[CachePadded<UnsafeCell<NBLFQHandle>>]> = (0..len).map(|_| CachePadded::new(UnsafeCell::new(Self::create_handle()))).collect();
         Self { 
             array,
+            handles,
+            current_thread: AtomicUsize::new(0),
+            num_threads,
             _phantom: PhantomData
         }
     }
@@ -41,10 +45,20 @@ impl<T> NBLFQTagged<T> {
             v.tag.wrapping_sub(u.tag) < (u16::MAX / 2 + 1)
         }
     }
+
+    fn create_handle() -> NBLFQHandle {
+        NBLFQHandle {
+            head: 0,
+            tail: 0,
+        }
+    }
 }
 
-impl<T> Queue<T, NBLFQHandle> for NBLFQTagged<T> {
-    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
+impl<T> Queue<T> for NBLFQTagged<T> {
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
         let item = Box::into_raw(Box::new(item));
         loop {
             let mut h = handle.head;
@@ -90,7 +104,10 @@ impl<T> Queue<T, NBLFQHandle> for NBLFQTagged<T> {
         }
     }
     
-    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
+    fn dequeue(&self, handle: usize) -> Option<T> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
         loop {
             let mut t = handle.tail;
             let mut prev = self.prev(t);
@@ -120,17 +137,22 @@ impl<T> Queue<T, NBLFQHandle> for NBLFQTagged<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<Handle> {
-        Ok(Handle {
-            head: 0,
-            tail: 0,
-        })
+    fn register(&self) -> HandleResult {
+        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        if thread_id < self.num_threads {
+            Ok(thread_id)
+        } else {
+            Err(HandleError)
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct NBLFQDCas<T> {
     array: Box<[CachePadded<AtomicDUsize>]>,
+    handles: Box<[CachePadded<UnsafeCell<NBLFQHandle>>]>,
+    current_thread: AtomicUsize,
+    num_threads: usize,
     _phantom: PhantomData<T>,
 }
 
@@ -170,11 +192,15 @@ impl<T> Clone for QueueIndex<T> {
 impl<T> Copy for QueueIndex<T> {}
 
 impl<T> NBLFQDCas<T> {
-    pub fn new(len: usize) -> Self {
+    pub fn new(len: usize, num_threads: usize) -> Self {
         let len = len.next_power_of_two();
         let array: Box<[CachePadded<AtomicDUsize>]> = (0..len).map(|_| CachePadded::new(AtomicDUsize::new(0))).collect();
+        let handles: Box<[CachePadded<UnsafeCell<NBLFQHandle>>]> = (0..len).map(|_| CachePadded::new(UnsafeCell::new(Self::create_handle()))).collect();
         Self { 
             array,
+            handles,
+            current_thread: AtomicUsize::new(0),
+            num_threads,
             _phantom: PhantomData
         }
     }
@@ -190,10 +216,20 @@ impl<T> NBLFQDCas<T> {
             v.counter.wrapping_sub(u.counter) < (usize::MAX / 2 + 1)
         }
     }
+    
+    fn create_handle() -> NBLFQHandle {
+        NBLFQHandle {
+            head: 0,
+            tail: 0,
+        }
+    }
 }
 
-impl<T> Queue<T, NBLFQHandle> for NBLFQDCas<T> {
-    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
+impl<T> Queue<T> for NBLFQDCas<T> {
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
         let item = Box::into_raw(Box::new(item));
         loop {
             let mut h = handle.head;
@@ -247,7 +283,10 @@ impl<T> Queue<T, NBLFQHandle> for NBLFQDCas<T> {
         }
     }
 
-    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
+    fn dequeue(&self, handle: usize) -> Option<T> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
         loop {
             let mut t = handle.tail;
             let mut prev = self.prev(t);
@@ -281,11 +320,13 @@ impl<T> Queue<T, NBLFQHandle> for NBLFQDCas<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<Handle> {
-        Ok(Handle {
-            head: 0,
-            tail: 0,
-        })
+    fn register(&self) -> HandleResult {
+        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        if thread_id < self.num_threads {
+            Ok(thread_id)
+        } else {
+            Err(HandleError)
+        }
     }
 
 }

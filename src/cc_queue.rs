@@ -20,8 +20,6 @@ pub struct CCQueueHandle<T> {
     deq: CSynchHandle<T, (), Option<T>, DequeueFunc<T>>,
 }
 
-type Handle<T>=CCQueueHandle<T>;
-
 #[derive(Debug)]
 pub struct CCQueue<T> {
     enq: CachePadded<CSynch<T, T, Result<(), QueueFull<T>>, EnqueueFunc<T>>>,
@@ -88,7 +86,7 @@ impl<T> CCQueue<T> {
     }
 }
 
-impl<T> Queue<T, CCQueueHandle<T>> for CCQueue<T> {
+impl<T> Queue<T> for CCQueue<T> {
     fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
         let handle = unsafe {
             &mut *self.handles[handle].get()

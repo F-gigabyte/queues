@@ -51,21 +51,19 @@
 ///
 /// ----------------------------------------------------------------------------
 
-use std::{cmp, marker::PhantomData, ptr, sync::atomic::{AtomicIsize, AtomicUsize, Ordering}, usize};
+use std::{cell::UnsafeCell, cmp, marker::PhantomData, ptr, sync::atomic::{AtomicIsize, AtomicUsize, Ordering}, usize};
 
 use crossbeam_utils::CachePadded;
 
-use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleResult, Queue, QueueFull}};
+use crate::{atomic_types::{AtomicDUsize, DUsize}, lcrq::LCRQ, queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull}, ring_buffer::RingBuffer};
 
 #[derive(Debug)]
-pub struct SCQ2Handle {
+pub struct SCQDCasHandle {
     lhead: usize,
 }
 
-type Handle = SCQ2Handle;
-
 #[derive(Debug)]
-struct SCQ2Ring<T> {
+struct SCQDCasRing<T, const CLOSABLE: bool> {
     head: CachePadded<AtomicUsize>,
     threshold: CachePadded<AtomicIsize>,
     tail: CachePadded<AtomicUsize>,
@@ -73,15 +71,18 @@ struct SCQ2Ring<T> {
     _phantom: PhantomData<T>,
 }
 
-unsafe impl<T> Send for SCQ2Ring<T> {}
-unsafe impl<T> Sync for SCQ2Ring<T> {}
+unsafe impl<T, const CLOSABLE: bool> Send for SCQDCasRing<T, CLOSABLE> {}
+unsafe impl<T, const CLOSABLE: bool> Sync for SCQDCasRing<T, CLOSABLE> {}
 
 fn compare_signed(a: usize, b: usize, oper: cmp::Ordering) -> bool {
     let c = a as isize - b as isize;
     c.cmp(&0) == oper
 }
 
-impl<T> SCQ2Ring<T> {
+impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
+    const CLOSED_SHIFT: usize = usize::BITS as usize - 1;
+    const CLOSED_MASK: usize = 1 << Self::CLOSED_SHIFT;
+
     const fn threshold4(n: usize) -> isize {
         (2 * n - 1) as isize
     }
@@ -154,6 +155,14 @@ impl<T> SCQ2Ring<T> {
         }
         loop {
             let tail = self.tail.fetch_add(1, Ordering::Acquire);
+            if CLOSABLE {
+                if tail & Self::CLOSED_MASK != 0 {
+                    let item = unsafe {
+                        *Box::from_raw(item)
+                    };
+                    return Err(QueueFull(item));
+                }
+            }
             let tail_cycle = tail & !(n - 1);
             let tail_index = tail % n;
             let pair = self.array[tail_index].load(Ordering::Acquire);
@@ -248,6 +257,11 @@ impl<T> SCQ2Ring<T> {
                 }
             }
             let tail = self.tail.load(Ordering::Acquire);
+            let tail = if CLOSABLE {
+                tail & !Self::CLOSED_MASK
+            } else {
+                tail
+            };
             if !compare_signed(tail, head + 1, cmp::Ordering::Greater) {
                 self.catchup(tail, head + 1);
                 self.threshold.fetch_sub(1, Ordering::Release);
@@ -260,41 +274,112 @@ impl<T> SCQ2Ring<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct SCQ2Cas<T> {
-    ring: SCQ2Ring<T>,
+impl<T> SCQDCasRing<T, true> {
+    pub fn close(&self) {
+        _ = self.tail.fetch_or(Self::CLOSED_MASK, Ordering::Release);
+    }
 }
 
-impl<T> SCQ2Cas<T> {
-    pub fn new(len: usize) -> Self {
-        let len = len.next_power_of_two();
-        Self { 
-            ring: SCQ2Ring::new_empty(len),
+#[derive(Debug)]
+pub struct SCQDCas<T, const CLOSABLE: bool> {
+    ring: SCQDCasRing<T, CLOSABLE>,
+    handles: Box<[CachePadded<UnsafeCell<SCQDCasHandle>>]>,
+    current_thread: AtomicUsize,
+    num_threads: usize,
+}
+
+impl<T, const CLOSABLE: bool> SCQDCas<T, CLOSABLE> {
+    fn create_handle(len: usize) -> SCQDCasHandle {
+        SCQDCasHandle {
+            lhead: len * 2,
         }
     }
 }
 
-impl<T> Queue<T, SCQ2Handle> for SCQ2Cas<T> {
-    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
-        self.ring.enqueue(item, &mut handle.lhead)
-    }
-
-    fn dequeue(&self, _: &mut Handle) -> Option<T> {
-        self.ring.dequeue()
-    }
-
-    fn register(&self) -> HandleResult<Handle> {
-        Ok(SCQ2Handle {
-            lhead: self.ring.array.len(),
-        })
+impl<T> RingBuffer<T> for SCQDCas<T, true> {
+    fn new(len: usize, num_threads: usize) -> Self {
+        let len = len.next_power_of_two();
+        let handles: Box<[CachePadded<UnsafeCell<SCQDCasHandle>>]> = (0..num_threads).map(|_| CachePadded::new(UnsafeCell::new(Self::create_handle(len)))).collect();
+        Self { 
+            ring: SCQDCasRing::new_empty(len),
+            handles,
+            current_thread: AtomicUsize::new(0),
+            num_threads
+        }
     }
 }
 
-impl<T> Drop for SCQ2Cas<T> {
+impl<T> RingBuffer<T> for SCQDCas<T, false> {
+    fn new(len: usize, num_threads: usize) -> Self {
+        let len = len.next_power_of_two();
+        let handles: Box<[CachePadded<UnsafeCell<SCQDCasHandle>>]> = (0..num_threads).map(|_| CachePadded::new(UnsafeCell::new(Self::create_handle(len)))).collect();
+        Self { 
+            ring: SCQDCasRing::new_empty(len),
+            handles,
+            current_thread: AtomicUsize::new(0),
+            num_threads
+        }
+    }
+}
+
+impl<T> Queue<T> for SCQDCas<T, true> {
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
+        match self.ring.enqueue(item, &mut handle.lhead) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                self.ring.close();
+                Err(err)
+            }
+        }
+    }
+
+    fn dequeue(&self, _: usize) -> Option<T> {
+        self.ring.dequeue()
+    }
+
+    fn register(&self) -> HandleResult {
+        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        if thread_id < self.num_threads {
+            Ok(thread_id)
+        } else {
+            Err(HandleError)
+        }
+    }
+}
+
+impl<T> Queue<T> for SCQDCas<T, false> {
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
+        self.ring.enqueue(item, &mut handle.lhead)
+    }
+
+    fn dequeue(&self, _: usize) -> Option<T> {
+        self.ring.dequeue()
+    }
+
+    fn register(&self) -> HandleResult {
+        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        if thread_id < self.num_threads {
+            Ok(thread_id)
+        } else {
+            Err(HandleError)
+        }
+    }
+}
+
+
+impl<T, const CLOSABLE: bool> Drop for SCQDCas<T, CLOSABLE> {
     fn drop(&mut self) {
         while let Some(_) = self.ring.dequeue() {}
     }
 }
 
-unsafe impl<T> Send for SCQ2Cas<T> {}
-unsafe impl<T> Sync for SCQ2Cas<T> {}
+unsafe impl<T, const CLOSABLE: bool> Send for SCQDCas<T, CLOSABLE> {}
+unsafe impl<T, const CLOSABLE: bool> Sync for SCQDCas<T, CLOSABLE> {}
+
+pub type LSCQDCas<T> = LCRQ<T, SCQDCas<T, true>>;

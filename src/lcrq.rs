@@ -79,7 +79,7 @@ pub struct CRQ<T, const CLOSABLE: bool> {
 }
 
 impl<T, const CLOSABLE: bool> RingBuffer<T> for CRQ<T, CLOSABLE> {
-    fn new(len: usize) -> Self {
+    fn new(len: usize, _: usize) -> Self {
         let array: Box<[CachePadded<AtomicDUsize>]> = (0..len).map(|v| CachePadded::new(AtomicDUsize::new(DUsize::from(Node::<T>::from_index(v))))).collect();
         Self { 
             head: CachePadded::new(AtomicUsize::new(0)), 
@@ -263,13 +263,6 @@ impl<T, const CLOSABLE: bool> Drop for CRQ<T, CLOSABLE> {
 }
 
 #[derive(Debug)]
-pub struct LCRQHandle {
-    thread_id: usize,
-}
-
-type Handle = LCRQHandle;
-
-#[derive(Debug)]
 struct LCRQNode<QUEUE> {
     node: QUEUE,
     next: CachePadded<AtomicPtr<LCRQNode<QUEUE>>>,
@@ -303,7 +296,7 @@ where
     QUEUE: RingBuffer<T>
 {
     pub fn new(ring_size: usize, num_threads: usize) -> Self {
-        let crq = Box::into_raw(Box::new(LCRQNode::new(QUEUE::new(ring_size))));
+        let crq = Box::into_raw(Box::new(LCRQNode::new(QUEUE::new(ring_size, num_threads))));
         Self { 
             head: CachePadded::new(AtomicPtr::new(crq)), 
             tail: CachePadded::new(AtomicPtr::new(crq)), 
@@ -316,7 +309,7 @@ where
     }
 }
 
-impl<T, QUEUE> Queue<T, LCRQHandle> for LCRQ<T, QUEUE>
+impl<T, QUEUE> Queue<T> for LCRQ<T, QUEUE>
 where 
     QUEUE: RingBuffer<T>
 {
@@ -338,7 +331,7 @@ where
                 },
                 Err(QueueFull(item2)) => {
                     item = item2;
-                    let queue = QUEUE::new(self.ring_size);
+                    let queue = QUEUE::new(self.ring_size, self.num_threads);
                     queue.enqueue(item, handle).unwrap_or_else(|_| {
                         panic!("Have full queue with an empty queue");
                     });

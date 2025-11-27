@@ -43,13 +43,6 @@ struct Node<T> {
     retired: CachePadded<AtomicBool>,
 }
 
-#[derive(Debug)]
-pub struct MSWaitFreeHandle {
-    thread_id: usize
-}
-
-type Handle = MSWaitFreeHandle;
-
 impl<T> Node<T> {
     const INDEX_NONE: usize = usize::MAX;
     pub fn new(enq_thread_id: usize) -> Self {
@@ -402,72 +395,72 @@ impl<T> MSWaitFree<T> {
     }
 }
 
-impl<T> Queue<T, MSWaitFreeHandle> for MSWaitFree<T> {
-    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
-        let phase = self.get_max_phase(handle.thread_id).wrapping_add(1);
-        let node = Box::into_raw(Box::new(Node::with_item(handle.thread_id, item)));
+impl<T> Queue<T> for MSWaitFree<T> {
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
+        let phase = self.get_max_phase(handle).wrapping_add(1);
+        let node = Box::into_raw(Box::new(Node::with_item(handle, item)));
         let op_desc = Box::into_raw(Box::new(OpDesc {
             phase,
             pending: true,
             enqueue: true,
             node
         }));
-        self.states[handle.thread_id].store(op_desc, Ordering::Release);
-        self.help(phase, handle.thread_id);
-        self.help_finish_enq(handle.thread_id);
-        self.hazard_ops.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
-        self.hazard_ops.clear(handle.thread_id, Self::HAZARD_PTR_NEXT);
-        self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
-        self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_NEXT);
-        self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
-        let mut desc = self.states[handle.thread_id].load(Ordering::Acquire);
+        self.states[handle].store(op_desc, Ordering::Release);
+        self.help(phase, handle);
+        self.help_finish_enq(handle);
+        self.hazard_ops.clear(handle, Self::HAZARD_PTR_CURRENT);
+        self.hazard_ops.clear(handle, Self::HAZARD_PTR_NEXT);
+        self.hazard_nodes.clear(handle, Self::HAZARD_PTR_CURRENT);
+        self.hazard_nodes.clear(handle, Self::HAZARD_PTR_NEXT);
+        self.hazard_nodes.clear(handle, Self::HAZARD_PTR_PREV);
+        let mut desc = self.states[handle].load(Ordering::Acquire);
         for _ in 0..self.num_threads * 2 {
             if desc == self.opdesc_end as *mut OpDesc<T> {
                 break;
             }
-            match self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
+            match self.states[handle].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
                 Ok(_) => break,
                 Err(_) => {},
             }
-            desc = self.states[handle.thread_id].load(Ordering::Acquire);
+            desc = self.states[handle].load(Ordering::Acquire);
         }
-        self.hazard_ops.retire(handle.thread_id, desc);
+        self.hazard_ops.retire(handle, desc);
         Ok(())
     }
 
-    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
-        let phase = self.get_max_phase(handle.thread_id).wrapping_add(1);
+    fn dequeue(&self, handle: usize) -> Option<T> {
+        let phase = self.get_max_phase(handle).wrapping_add(1);
         let op_desc = Box::into_raw(Box::new(OpDesc {
             phase,
             pending: true,
             enqueue: false,
             node: ptr::null()
         }));
-        self.states[handle.thread_id].store(op_desc, Ordering::Release);
-        self.help(phase, handle.thread_id);
-        self.help_finish_deq(handle.thread_id);
-        let current_desc = self.hazard_ops.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.states[handle.thread_id].load(Ordering::Acquire));
+        self.states[handle].store(op_desc, Ordering::Release);
+        self.help(phase, handle);
+        self.help_finish_deq(handle);
+        let current_desc = self.hazard_ops.mark_ptr(handle, Self::HAZARD_PTR_CURRENT, self.states[handle].load(Ordering::Acquire));
         let node = unsafe {
             (*current_desc).node
         };
         if node.is_null() {
-            self.hazard_ops.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
-            self.hazard_ops.clear(handle.thread_id, Self::HAZARD_PTR_NEXT);
-            self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
-            self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_NEXT);
-            self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
-            let mut desc = self.states[handle.thread_id].load(Ordering::Acquire);
+            self.hazard_ops.clear(handle, Self::HAZARD_PTR_CURRENT);
+            self.hazard_ops.clear(handle, Self::HAZARD_PTR_NEXT);
+            self.hazard_nodes.clear(handle, Self::HAZARD_PTR_CURRENT);
+            self.hazard_nodes.clear(handle, Self::HAZARD_PTR_NEXT);
+            self.hazard_nodes.clear(handle, Self::HAZARD_PTR_PREV);
+            let mut desc = self.states[handle].load(Ordering::Acquire);
             for _ in 0..self.num_threads {
-                match self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
+                match self.states[handle].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
                     Ok(_) => break,
                     Err(_) => {},
                 }
-                desc = self.states[handle.thread_id].load(Ordering::Acquire);
+                desc = self.states[handle].load(Ordering::Acquire);
                 if desc == self.opdesc_end as *mut OpDesc<T> {
                     break;
                 }
             }
-            self.hazard_ops.retire(handle.thread_id, desc);
+            self.hazard_ops.retire(handle, desc);
             None
         } else {
             let next_ptr = unsafe {
@@ -481,43 +474,41 @@ impl<T> Queue<T, MSWaitFreeHandle> for MSWaitFree<T> {
             };
             next.can_delete.store(true, Ordering::Release);
             if next.retired.load(Ordering::Acquire) {
-                self.hazard_nodes.retire(handle.thread_id, next_ptr);
+                self.hazard_nodes.retire(handle, next_ptr);
             }
 
-            self.hazard_ops.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
-            self.hazard_ops.clear(handle.thread_id, Self::HAZARD_PTR_NEXT);
-            self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
-            self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_NEXT);
-            self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
+            self.hazard_ops.clear(handle, Self::HAZARD_PTR_CURRENT);
+            self.hazard_ops.clear(handle, Self::HAZARD_PTR_NEXT);
+            self.hazard_nodes.clear(handle, Self::HAZARD_PTR_CURRENT);
+            self.hazard_nodes.clear(handle, Self::HAZARD_PTR_NEXT);
+            self.hazard_nodes.clear(handle, Self::HAZARD_PTR_PREV);
             let can_delete = unsafe {
                 (*node).retired.store(true, Ordering::Release);
                 (*node).can_delete.load(Ordering::Acquire)
             };
             if can_delete {
-                self.hazard_nodes.retire(handle.thread_id, node as *mut Node<T>);
+                self.hazard_nodes.retire(handle, node as *mut Node<T>);
             }
-            let mut desc = self.states[handle.thread_id].load(Ordering::Acquire);
+            let mut desc = self.states[handle].load(Ordering::Acquire);
             for _ in 0..self.num_threads * 2 {
                 if desc == self.opdesc_end as *mut OpDesc<T> {
                     break;
                 }
-                match self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
+                match self.states[handle].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::Release, Ordering::Relaxed) {
                     Ok(_) => break,
                     Err(_) => {},
                 }
-                desc = self.states[handle.thread_id].load(Ordering::Acquire);
+                desc = self.states[handle].load(Ordering::Acquire);
             }
-            self.hazard_ops.retire(handle.thread_id, desc);
+            self.hazard_ops.retire(handle, desc);
             Some(val)
         }
     }
 
-    fn register(&self) -> HandleResult<Handle> {
+    fn register(&self) -> HandleResult {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
-            Ok(Handle {
-                thread_id
-            })
+            Ok(thread_id)
         } else {
             Err(HandleError)
         }
@@ -526,10 +517,7 @@ impl<T> Queue<T, MSWaitFreeHandle> for MSWaitFree<T> {
 
 impl<T> Drop for MSWaitFree<T> {
     fn drop(&mut self) {
-        let mut handle = MSWaitFreeHandle {
-            thread_id: 0
-        };
-        while let Some(_) = self.dequeue(&mut handle) {}
+        while let Some(_) = self.dequeue(0) {}
         unsafe {
             _ = Box::from_raw(self.head.load(Ordering::Acquire));
             _ = Box::from_raw(self.opdesc_end as *mut OpDesc<T>);

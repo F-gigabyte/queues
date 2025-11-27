@@ -20,13 +20,6 @@ pub struct MSLockFree<T> {
     hazard: Pointers<LockFreeNode<T>, BoxMemory>
 }
 
-#[derive(Debug)]
-pub struct MSLockFreeHandle {
-    thread_id: usize,
-}
-
-type Handle = MSLockFreeHandle;
-
 impl<T> MSLockFree<T> {
     pub fn new(num_threads: usize) -> Self {
         let node = Box::into_raw(Box::new(LockFreeNode {
@@ -43,7 +36,7 @@ impl<T> MSLockFree<T> {
     }
 }
 
-impl<T> Queue<T, MSLockFreeHandle> for MSLockFree<T> {
+impl<T> Queue<T> for MSLockFree<T> {
     fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
         let node = Box::into_raw(Box::new(LockFreeNode {
             value: CachePadded::new(MaybeUninit::new(item)),

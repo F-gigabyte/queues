@@ -6,7 +6,7 @@ use crossbeam_utils::CachePadded;
 use portable_atomic::{AtomicIsize, AtomicPtr, AtomicUsize};
 use stackalloc::stackalloc;
 
-use crate::queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull};
+use crate::queue::{EnqueueResult, HandleError, HandleResult, Queue};
 
 #[derive(Debug)]
 struct EnqRequest<T> {
@@ -775,18 +775,11 @@ impl<T> WFQ<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct WFQHandle {
-    thread_id: usize
-}
-
-type Handle = WFQHandle;
-
-impl<T> Queue<T, WFQHandle> for WFQ<T> {
-    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
+impl<T> Queue<T> for WFQ<T> {
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
         let item = Box::into_raw(Box::new(item));
         let handle = unsafe {
-            &mut *self.handles[handle.thread_id].get()
+            &mut *self.handles[handle].get()
         };
         handle
             .hazard_node_id
@@ -805,9 +798,9 @@ impl<T> Queue<T, WFQHandle> for WFQ<T> {
         Ok(())
     }
 
-    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
+    fn dequeue(&self, handle: usize) -> Option<T> {
         let handle = unsafe {
-            &mut *self.handles[handle.thread_id].get()
+            &mut *self.handles[handle].get()
         };
         handle
             .hazard_node_id
@@ -852,12 +845,10 @@ impl<T> Queue<T, WFQHandle> for WFQ<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<Handle> {
+    fn register(&self) -> HandleResult {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
-            Ok(WFQHandle {
-                thread_id
-            })
+            Ok(thread_id)
         } else {
             Err(HandleError)
         }
@@ -869,6 +860,6 @@ unsafe impl<T> Sync for WFQ<T> {}
 
 impl<T> Drop for WFQ<T> {
     fn drop(&mut self) {
-        while let Some(_) = self.dequeue(&mut WFQHandle {thread_id: 0}) {}
+        while let Some(_) = self.dequeue(0) {}
     }
 }

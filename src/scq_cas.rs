@@ -240,6 +240,11 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
                     if self.array[head_index].compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed).is_ok() { break 'inner }
                 }
                 let tail = self.tail.load(Ordering::Acquire);
+                let tail = if CLOSABLE {
+                    tail & !Self::CLOSED_MASK
+                } else {
+                    tail
+                };
                 if !compare_signed(tail, head + 1, cmp::Ordering::Greater) {
                     self.catchup(tail, head + 1);
                     self.threshold.fetch_sub(1, Ordering::Release);
@@ -268,8 +273,8 @@ pub struct SCQCas<T, const CLOSABLE: bool> {
     data: Box<[CachePadded<UnsafeCell<MaybeUninit<T>>>]>,
 }
 
-impl<T, const CLOSABLE: bool> RingBuffer<T> for SCQCas<T, CLOSABLE> {
-    fn new(len: usize) -> Self {
+impl<T> RingBuffer<T> for SCQCas<T, true> {
+    fn new(len: usize, _: usize) -> Self {
         let len = len.next_power_of_two();
         let data: Box<[CachePadded<UnsafeCell<MaybeUninit<T>>>]> = (0..len).map(|_| CachePadded::new(UnsafeCell::new(MaybeUninit::uninit()))).collect();
         Self { 
@@ -280,29 +285,70 @@ impl<T, const CLOSABLE: bool> RingBuffer<T> for SCQCas<T, CLOSABLE> {
     }
 }
 
-impl<T, const CLOSABLE: bool> Queue<T> for SCQCas<T, CLOSABLE> {
-    fn enqueue(&self, item: T, _: &mut ()) -> EnqueueResult<T> {
+impl<T> RingBuffer<T> for SCQCas<T, false> {
+    fn new(len: usize, _: usize) -> Self {
+        let len = len.next_power_of_two();
+        let data: Box<[CachePadded<UnsafeCell<MaybeUninit<T>>>]> = (0..len).map(|_| CachePadded::new(UnsafeCell::new(MaybeUninit::uninit()))).collect();
+        Self { 
+            aq: SCQRing::new_empty(len), 
+            fq: SCQRing::new_full(len), 
+            data,
+        }
+    }
+}
+
+impl<T> Queue<T> for SCQCas<T, true> {
+    fn enqueue(&self, item: T, _: usize) -> EnqueueResult<T> {
+        if let Some(index) = self.fq.dequeue() {
+            match self.aq.enqueue(index) {
+                Ok(_) => {
+                    unsafe {
+                        self.data[index].get().write(MaybeUninit::new(item));
+                    }
+                    Ok(())
+                },
+                Err(_) => {
+                    _ = self.fq.enqueue(index);
+                    self.aq.close();
+                    Err(QueueFull(item))
+                },
+            }
+        } else {
+            Err(QueueFull(item))
+        }
+    }
+    
+    fn dequeue(&self, _: usize) -> Option<T> {
+        if let Some(index) = self.aq.dequeue() {
+            let val = unsafe {
+                self.data[index].get().read().assume_init()
+            };
+            _ = self.fq.enqueue(index);
+            Some(val)
+        } else {
+            None
+        }
+    }
+    
+    fn register(&self) -> HandleResult {
+        Ok(0)
+    }
+}
+
+impl<T> Queue<T> for SCQCas<T, false> {
+    fn enqueue(&self, item: T, _: usize) -> EnqueueResult<T> {
         if let Some(index) = self.fq.dequeue() {
             unsafe {
                 self.data[index].get().write(MaybeUninit::new(item));
             }
-            if CLOSABLE {
-                match self.aq.enqueue(index) {
-                    Ok(_) => {},
-                    Err(_) => {
-                        _ = self.fq.enqueue(index);
-                    },
-                }
-            } else {
-                _ = self.aq.enqueue(index);
-            }
+            _ = self.aq.enqueue(index);
             Ok(())
         } else {
             Err(QueueFull(item))
         }
     }
 
-    fn dequeue(&self, _: &mut ()) -> Option<T> {
+    fn dequeue(&self, _: usize) -> Option<T> {
         if let Some(index) = self.aq.dequeue() {
             let val = unsafe {
                 self.data[index].get().read().assume_init()
@@ -314,8 +360,8 @@ impl<T, const CLOSABLE: bool> Queue<T> for SCQCas<T, CLOSABLE> {
         }
     }
 
-    fn register(&self) -> HandleResult<()> {
-        Ok(())
+    fn register(&self) -> HandleResult {
+        Ok(0)
     }
 }
 

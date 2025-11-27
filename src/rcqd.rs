@@ -89,7 +89,7 @@ impl<T> RCQD<T> {
 }
 
 impl<T> Queue<T> for RCQD<T> {
-    fn enqueue(&self, item: T, _: &mut ()) -> EnqueueResult<T> {
+    fn enqueue(&self, item: T, _: usize) -> EnqueueResult<T> {
         let item = Box::into_raw(Box::new(item));
         let item = item as DUsize | ((Self::STATE_OCCUPIED as DUsize) << Self::STATE_SHIFT);
         let loc_tail = self.tail.fetch_add(1, Ordering::Acquire) as usize % self.slots.len();
@@ -109,7 +109,7 @@ impl<T> Queue<T> for RCQD<T> {
         }
     }
 
-    fn dequeue(&self, _: &mut ()) -> Option<T> {
+    fn dequeue(&self, _: usize) -> Option<T> {
         let loc_head = self.head.fetch_add(1, Ordering::Acquire) as usize % self.slots.len();
         loop {
             let slot = self.slots[loc_head].slot.load(Ordering::Acquire);
@@ -132,9 +132,8 @@ impl<T> Queue<T> for RCQD<T> {
         }
     }
 
-    fn register(&self) -> HandleResult<()> {
-        Ok(())
-        
+    fn register(&self) -> HandleResult {
+        Ok(0)
     }
 }
 

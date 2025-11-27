@@ -155,14 +155,7 @@ impl<T> CRTurn<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct CRTurnHandle {
-    thread_id: usize
-}
-
-type Handle = CRTurnHandle;
-
-impl<T> Queue<T, CRTurnHandle> for CRTurn<T> {
+impl<T> Queue<T> for CRTurn<T> {
     fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
         let thread_id = handle;
         let my_node = Box::into_raw(Box::new(Node::new_with(item, thread_id)));

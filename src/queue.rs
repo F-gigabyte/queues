@@ -6,7 +6,7 @@ pub struct HandleError;
 pub type EnqueueResult<T> = Result<(), QueueFull<T>>;
 pub type HandleResult = Result<usize, HandleError>;
 
-pub trait Queue<T, HANDLE=()>
+pub trait Queue<T>
 {
     fn register(&self) -> HandleResult; 
     fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T>;

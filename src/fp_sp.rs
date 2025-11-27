@@ -49,8 +49,6 @@ pub struct FpSpHandle {
     help_record: HelpRecord,
 }
 
-type Handle = FpSpHandle;
-
 impl<T> Node<T> {
     const INDEX_NONE: usize = usize::MAX;
     pub fn new(enq_thread_id: usize) -> Self {
@@ -245,6 +243,7 @@ impl<T> FpSp<T> {
             hazard_ops: Pointers::new(BoxMemory, num_threads, 2, num_threads * 2), 
             hazard_nodes: Pointers::new(BoxMemory, num_threads, 3, num_threads * 2),
             opdesc_end,
+            handles,
             current_thread: AtomicUsize::new(0),
             num_threads
         }
@@ -682,7 +681,7 @@ impl<T> FpSp<T> {
     }
 
     fn create_handle(thread_id: usize, last_phase: usize) -> FpSpHandle {
-        Handle {
+        FpSpHandle {
             thread_id,
             help_record: HelpRecord { 
                 current_thread_id: 0, 
@@ -694,7 +693,7 @@ impl<T> FpSp<T> {
 
 }
 
-impl<T> Queue<T, FpSpHandle> for FpSp<T> {
+impl<T> Queue<T> for FpSp<T> {
     fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
         let handle = unsafe {
             &mut *self.handles[handle].get()

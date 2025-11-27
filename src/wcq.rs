@@ -75,6 +75,7 @@ struct WCQRing {
     array: Box<[CachePadded<AtomicDUsize>]>,
     states: Box<[CachePadded<WCQState>]>,
     handle_tail: AtomicPtr<WCQState>,
+    handles: Box<[CachePadded<UnsafeCell<WCQRingHandle>>]>,
     current_thread: AtomicUsize,
     num_threads: usize,
 }
@@ -176,13 +177,16 @@ impl WCQRing {
             CachePadded::new(AtomicDUsize::new(Self::create_pair(usize::MAX, (-(n as isize) - 1) as usize)))
         }).collect();
         let states: Box<[CachePadded<WCQState>]> = (0..num_threads).map(|_| CachePadded::new(WCQState::new())).collect();
+        let handle_tail = AtomicPtr::new(ptr::null_mut());
+        let handles: Box<[CachePadded<UnsafeCell<WCQRingHandle>>]> = (0..num_threads).map(|i| CachePadded::new(UnsafeCell::new(Self::create_handle(i, &states, &handle_tail)))).collect();
         Self {
             head: CachePadded::new(AtomicDUsize::new(0)),
             tail: CachePadded::new(AtomicDUsize::new(0)),
             threshold: CachePadded::new(AtomicIsize::new(-1)),
             array,
             states,
-            handle_tail: AtomicPtr::new(ptr::null_mut()),
+            handles,
+            handle_tail,
             current_thread: AtomicUsize::new(0),
             num_threads
         }
@@ -203,13 +207,16 @@ impl WCQRing {
                     }
         ))}).collect();
         let states: Box<[CachePadded<WCQState>]> = (0..num_threads).map(|_| CachePadded::new(WCQState::new())).collect();
+        let handle_tail = AtomicPtr::new(ptr::null_mut());
+        let handles: Box<[CachePadded<UnsafeCell<WCQRingHandle>>]> = (0..num_threads).map(|i| CachePadded::new(UnsafeCell::new(Self::create_handle(i, &states, &handle_tail)))).collect();
         Self {
             head: CachePadded::new(AtomicDUsize::new(0)),
             tail: CachePadded::new(AtomicDUsize::new(Self::create_pair(len as usize * 4, 0))),
             array,
             threshold: CachePadded::new(AtomicIsize::new(len as isize + n as isize - 1)),
             states,
-            handle_tail: AtomicPtr::new(ptr::null_mut()),
+            handles,
+            handle_tail,
             current_thread: AtomicUsize::new(0),
             num_threads
         }
@@ -232,13 +239,16 @@ impl WCQRing {
                     }
             ))}).collect();
         let states: Box<[CachePadded<WCQState>]> = (0..num_threads).map(|_| CachePadded::new(WCQState::new())).collect();
+        let handle_tail = AtomicPtr::new(ptr::null_mut());
+        let handles: Box<[CachePadded<UnsafeCell<WCQRingHandle>>]> = (0..num_threads).map(|i| CachePadded::new(UnsafeCell::new(Self::create_handle(i, &states, &handle_tail)))).collect();
         Self {
             head: CachePadded::new(AtomicDUsize::new(Self::create_pair(start * 4, 0))),
             tail: CachePadded::new(AtomicDUsize::new(Self::create_pair(end * 4, 0))),
             threshold: CachePadded::new(AtomicIsize::new(len as isize + n as isize - 1)),
             array,
             states,
-            handle_tail: AtomicPtr::new(ptr::null_mut()),
+            handles,
+            handle_tail,
             current_thread: AtomicUsize::new(0),
             num_threads
         }
@@ -528,7 +538,10 @@ impl WCQRing {
         self.do_dequeue_slow(head, state);
     }
 
-    pub fn enqueue(&self, elem: usize, handle: &mut WCQRingHandle) {
+    pub fn enqueue(&self, elem: usize, handle: usize) {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
         let n = self.array.len();
         let half = n / 2;
         let mut patience = WCQ_PATIENCE_ENQUEUE;
@@ -569,7 +582,10 @@ impl WCQRing {
     }
 
 
-    pub fn dequeue(&self, handle: &mut WCQRingHandle) -> Option<usize> {
+    pub fn dequeue(&self, handle: usize) -> Option<usize> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
         let n = self.array.len();
         if self.threshold.load(Ordering::Acquire) < 0 {
             return None;
@@ -629,39 +645,43 @@ impl WCQRing {
         self.dequeue_slow(head, unsafe {&*handle.state})
     }
 
-    pub fn register(&self) -> HandleResult<WCQRingHandle> {
+    fn create_handle(thread_id: usize, states: &[CachePadded<WCQState>], handle_tail: &AtomicPtr<WCQState>) -> WCQRingHandle {
+        let state = &states[thread_id];
+        let state_ptr = &**state as *const WCQState as *mut WCQState;
+        let tail_ptr = handle_tail.load(Ordering::Acquire);
+        if tail_ptr.is_null() {
+            state.next.store(state_ptr, Ordering::Release);
+            match handle_tail.compare_exchange(tail_ptr, state_ptr, Ordering::Release, Ordering::Relaxed) {
+                Ok(_) => return WCQRingHandle {
+                    next_check: WCQ_DELAY,
+                    state: state_ptr as *const WCQState,
+                    current_thread: state_ptr as *const WCQState,
+                },
+                Err(_) => {},
+            }
+        }
+        let tail = unsafe {
+            &*tail_ptr
+        };
+        let next = tail.next.load(Ordering::Acquire);
+        loop {
+            state.next.store(next, Ordering::Release);
+            match tail.next.compare_exchange_weak(next, state_ptr, Ordering::Release, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(_) => {},
+            }
+        }
+        WCQRingHandle {
+            next_check: WCQ_DELAY,
+            state: state_ptr as *const WCQState,
+            current_thread: state_ptr as *const WCQState,
+        }
+    }
+
+    pub fn register(&self) -> HandleResult {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
-            let state = &self.states[thread_id];
-            let state_ptr = &**state as *const WCQState as *mut WCQState;
-            let tail_ptr = self.handle_tail.load(Ordering::Acquire);
-            if tail_ptr.is_null() {
-                state.next.store(state_ptr, Ordering::Release);
-                match self.handle_tail.compare_exchange(tail_ptr, state_ptr, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => return Ok(WCQRingHandle {
-                        next_check: WCQ_DELAY,
-                        state: state_ptr as *const WCQState,
-                        current_thread: state_ptr as *const WCQState,
-                    }),
-                    Err(_) => {},
-                }
-            }
-            let tail = unsafe {
-                &*tail_ptr
-            };
-            let next = tail.next.load(Ordering::Acquire);
-            loop {
-                state.next.store(next, Ordering::Release);
-                match tail.next.compare_exchange_weak(next, state_ptr, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => break,
-                    Err(_) => {},
-                }
-            }
-            Ok(WCQRingHandle {
-                next_check: WCQ_DELAY,
-                state: state_ptr as *const WCQState,
-                current_thread: state_ptr as *const WCQState,
-            })
+            Ok(thread_id)
         } else {
             Err(HandleError)
         }
@@ -690,46 +710,36 @@ impl<T> WCQ<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct WCQHandle {
-    aq_handle: WCQRingHandle,
-    fq_handle: WCQRingHandle,
-}
-
-type Handle = WCQHandle;
-
-impl<T> Queue<T, WCQHandle> for WCQ<T> {
-    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
-        if let Some(index) = self.fq.dequeue(&mut handle.fq_handle) {
+impl<T> Queue<T> for WCQ<T> {
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
+        if let Some(index) = self.fq.dequeue(handle) {
             unsafe {
                 self.data[index].get().write(MaybeUninit::new(item));
             }
-            self.aq.enqueue(index, &mut handle.aq_handle);
+            self.aq.enqueue(index, handle);
             Ok(())
         } else {
             Err(QueueFull(item))
         }
     }
 
-    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
-        if let Some(index) = self.aq.dequeue(&mut handle.aq_handle) {
+    fn dequeue(&self, handle: usize) -> Option<T> {
+        if let Some(index) = self.aq.dequeue(handle) {
             let val = unsafe {
                 self.data[index].get().read().assume_init()
             };
-            self.fq.enqueue(index, &mut handle.fq_handle);
+            self.fq.enqueue(index, handle);
             Some(val)
         } else {
             None
         }
     }
 
-    fn register(&self) -> HandleResult<Handle> {
+    fn register(&self) -> HandleResult {
         if let Ok(aq_handle) = self.aq.register() {
             let fq_handle = self.fq.register().unwrap();
-            Ok(WCQHandle {
-                aq_handle,
-                fq_handle
-            })
+            assert!(aq_handle == fq_handle);
+            Ok(aq_handle)
         } else {
             Err(HandleError)
         }
@@ -738,22 +748,7 @@ impl<T> Queue<T, WCQHandle> for WCQ<T> {
 
 impl<T> Drop for WCQ<T> {
     fn drop(&mut self) {
-        let mut head = unsafe {
-            *WCQRing::get_array_entry(&self.aq.head).as_ptr()
-        } >> 4;
-        let tail = unsafe {
-            *WCQRing::get_array_entry(&self.aq.tail).as_ptr()
-        } >> 4;
-        while head < tail {
-            let head_index = head % self.aq.array.len();
-            let index = unsafe {
-                *WCQRing::get_array_entry(&self.aq.array[head_index]).as_ptr()
-            };
-            unsafe {
-                self.data[index].get().read().assume_init_drop();
-            }
-            head += 1;
-        }
+        while let Some(_) = self.dequeue(0) {}
     }
 }
 

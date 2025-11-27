@@ -31,9 +31,9 @@ struct Message {
     data: [usize; 500]
 }
 
-fn run_queue_producer_round<QUEUE, HANDLER>(queue: &Arc<QUEUE>, num_threads: usize) -> u128
+fn run_queue_producer_round<QUEUE>(queue: &Arc<QUEUE>, num_threads: usize) -> u128
 where 
-    QUEUE: Queue<Message, HANDLER> + Send + Sync + 'static
+    QUEUE: Queue<Message> + Send + Sync + 'static
 {
     let mut threads = Vec::new();
     let begin_tasks = Arc::new(AtomicBool::new(false));
@@ -47,7 +47,7 @@ where
             }
             for _ in 0..1000 {
                 loop {
-                    if let Some(_) = queue.dequeue(&mut handle) {
+                    if let Some(_) = queue.dequeue(handle) {
                         break;
                     }
                 }
@@ -58,7 +58,7 @@ where
     let start = Instant::now();
     begin_tasks.store(true, Ordering::Release);
     for i in 0..num_threads * 1000 {
-        queue.enqueue(Message { from: num_threads + 1, to: i, data: [i; 500] }, &mut handle).unwrap();
+        queue.enqueue(Message { from: num_threads + 1, to: i, data: [i; 500] }, handle).unwrap();
     }
     for thread in threads {
         thread.join().unwrap();
@@ -67,9 +67,9 @@ where
     duration.as_nanos()
 }
 
-fn run_queue_producer<QUEUE, HANDLER>(queue: &Arc<QUEUE>, rounds: usize) -> Vec<(usize, Vec<u128>)> 
+fn run_queue_producer<QUEUE>(queue: &Arc<QUEUE>, rounds: usize) -> Vec<(usize, Vec<u128>)> 
 where
-    QUEUE: Queue<Message, HANDLER> + Send + Sync + 'static
+    QUEUE: Queue<Message> + Send + Sync + 'static
 {
     let mut results = Vec::new();
     for i in 0..rounds {
@@ -89,6 +89,6 @@ where
 
 fn main() {
     let num_threads = 64;
-    let queue = Arc::new(LockQueue::new(num_threads * 1000));
+    let queue = Arc::new(LockQueue::new(num_threads * 1000, num_threads));
     println!("{:?}", run_queue_producer(&queue, num_threads));
 }
