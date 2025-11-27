@@ -1,8 +1,9 @@
-use std::{cell::UnsafeCell, mem::{self, MaybeUninit}, ptr::NonNull};
+use std::{cell::UnsafeCell, mem::{self, MaybeUninit}, ptr::NonNull, sync::atomic::Ordering};
 
 use crossbeam_utils::CachePadded;
+use portable_atomic::AtomicUsize;
 
-use crate::{csynch::{CSynch, CSynchHandle}, queue::{EnqueueResult, HandleResult, Queue, QueueFull}};
+use crate::{csynch::{CSynch, CSynchHandle}, queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull}};
 
 #[derive(Debug)]
 struct Node<T> {
@@ -27,19 +28,26 @@ pub struct CCQueue<T> {
     deq: CachePadded<CSynch<T, (), Option<T>, DequeueFunc<T>>>,
     head: UnsafeCell<NonNull<Node<T>>>,
     tail: UnsafeCell<NonNull<Node<T>>>,
+    current_thread: AtomicUsize,
+    num_threads: usize,
+    handles: Box<[CachePadded<UnsafeCell<CCQueueHandle<T>>>]>
 }
 
 impl<T> CCQueue<T> {
-    pub fn new() -> Self {
+    pub fn new(num_threads: usize) -> Self {
         let dummy = NonNull::new(Box::into_raw(Box::new(Node {
             data: MaybeUninit::uninit(),
             next: None,
         }))).unwrap();
+        let handles: Box<[CachePadded<UnsafeCell<CCQueueHandle<T>>>]> = (0..num_threads).map(|_| CachePadded::new(UnsafeCell::new(Self::create_handle()))).collect();
         Self {
             enq: CachePadded::new(CSynch::new()),
             deq: CachePadded::new(CSynch::new()),
             head: UnsafeCell::new(dummy),
             tail: UnsafeCell::new(dummy),
+            handles,
+            current_thread: AtomicUsize::new(0),
+            num_threads,
         }
     }
 
@@ -71,22 +79,37 @@ impl<T> CCQueue<T> {
             None
         }
     }
+
+    fn create_handle() -> CCQueueHandle<T> {
+        CCQueueHandle {
+            enq: CSynchHandle::new(),
+            deq: CSynchHandle::new(),
+        }
+    }
 }
 
 impl<T> Queue<T, CCQueueHandle<T>> for CCQueue<T> {
-    fn enqueue(&self, item: T, handle: &mut Handle<T>) -> EnqueueResult<T> {
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
         self.enq.apply(&mut handle.enq, self, item, Self::serial_enqueue)
     }
 
-    fn dequeue(&self, handle: &mut Handle<T>) -> Option<T> {
+    fn dequeue(&self, handle: usize) -> Option<T> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
         self.deq.apply(&mut handle.deq, self, (), Self::serial_dequeue)
     }
 
-    fn register(&self) -> HandleResult<Handle<T>> {
-        Ok(Handle {
-            enq: CSynchHandle::new(),
-            deq: CSynchHandle::new(),
-        })
+    fn register(&self) -> HandleResult {
+        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        if thread_id < self.num_threads {
+            Ok(thread_id)
+        } else {
+            Err(HandleError)
+        }
     }
 }
 

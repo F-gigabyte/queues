@@ -72,18 +72,18 @@ impl<T> RingBuffer<T> for LockQueue<T> {
 }
 
 impl<T> Queue<T> for LockQueue<T> {
-    fn enqueue(&self, item: T, _: &mut ()) -> EnqueueResult<T> {
+    fn enqueue(&self, item: T, _: usize) -> EnqueueResult<T> {
         let mut inner = self.inner.lock().unwrap();
         inner.enqueue(item)
     }
 
-    fn dequeue(&self, _: &mut ()) -> Option<T> {
+    fn dequeue(&self, _: usize) -> Option<T> {
         let mut inner = self.inner.lock().unwrap();
         inner.dequeue()
     }
 
-    fn register(&self) -> HandleResult<()> {
-        Ok(())
+    fn register(&self) -> HandleResult {
+        Ok(0)
     }
 }
 

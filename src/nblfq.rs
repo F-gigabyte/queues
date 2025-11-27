@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, ptr, sync::atomic::Ordering};
+use std::{cell::UnsafeCell, marker::PhantomData, ptr, sync::atomic::Ordering};
 
 use crossbeam_utils::CachePadded;
 use portable_atomic::AtomicUsize;
@@ -8,6 +8,7 @@ use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleR
 #[derive(Debug)]
 pub struct NBLFQTagged<T> {
     array: Box<[CachePadded<AtomicUsize>]>,
+    handles: Box<[CachePadded<UnsafeCell<NBLFQHandle>>]>,
     _phantom: PhantomData<T>,
 }
 

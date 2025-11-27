@@ -25,11 +25,11 @@
 /// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 /// *****************************************************************************
 
-use std::{marker::PhantomData, mem::{self, MaybeUninit}, ptr, sync::atomic::Ordering};
+use std::{cell::UnsafeCell, marker::PhantomData, mem::{self, MaybeUninit}, ptr, sync::atomic::Ordering};
 
 use crossbeam_utils::CachePadded;
 use hazard::{BoxMemory, Pointers};
-use portable_atomic::{AtomicBool, AtomicPtr, AtomicU128, AtomicUsize};
+use portable_atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 
 use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleError, HandleResult, Queue}};
 
@@ -213,6 +213,7 @@ pub struct FpSp<T> {
     hazard_ops: Pointers<OpDesc<T>, BoxMemory>,
     hazard_nodes: Pointers<Node<T>, BoxMemory>,
     opdesc_end: *const OpDesc<T>,
+    handles: Box<[CachePadded<UnsafeCell<FpSpHandle>>]>,
     current_thread: AtomicUsize,
     num_threads: usize
 }
@@ -231,6 +232,12 @@ impl<T> FpSp<T> {
             node: ptr::null()
         }));
         let states: Box<[CachePadded<AtomicPtr<OpDesc<T>>>]> = (0..num_threads).map(|_| CachePadded::new(AtomicPtr::new(opdesc_end))).collect();
+        let handles: Box<[CachePadded<UnsafeCell<FpSpHandle>>]> = (0..num_threads).map(|i| {
+            let last_phase = unsafe {
+                (*states[i].load(Ordering::Acquire)).phase
+            };
+            CachePadded::new(UnsafeCell::new(Self::create_handle(i, last_phase)))
+        }).collect();
         Self { 
             head: CachePadded::new(StampedAtomicPtr::new(StampedPtr::new(sentinal, usize::MAX))), 
             tail: CachePadded::new(AtomicPtr::new(sentinal)), 
@@ -674,10 +681,24 @@ impl<T> FpSp<T> {
         }
     }
 
+    fn create_handle(thread_id: usize, last_phase: usize) -> FpSpHandle {
+        Handle {
+            thread_id,
+            help_record: HelpRecord { 
+                current_thread_id: 0, 
+                last_phase, 
+                next_check: HelpRecord::HELPING_DELAY 
+            }
+        }
+    }
+
 }
 
 impl<T> Queue<T, FpSpHandle> for FpSp<T> {
-    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
         self.help_if_needed(handle);
         let node = Box::into_raw(Box::new(Node::with_item(Node::<T>::INDEX_NONE, item)));
         let mut tries = 0;
@@ -706,7 +727,10 @@ impl<T> Queue<T, FpSpHandle> for FpSp<T> {
         self.slow_enqueue(node, handle)
     }
 
-    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
+    fn dequeue(&self, handle: usize) -> Option<T> {
+        let handle = unsafe {
+            &mut *self.handles[handle].get()
+        };
         self.help_if_needed(handle);
         let mut tries = 0;
         while tries < Self::MAX_FAILURES {
@@ -757,20 +781,10 @@ impl<T> Queue<T, FpSpHandle> for FpSp<T> {
     }
 
     
-    fn register(&self) -> HandleResult<Handle> {
+    fn register(&self) -> HandleResult {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
-            let last_phase = unsafe {
-                (*self.states[thread_id].load(Ordering::Acquire)).phase
-            };
-            Ok(Handle {
-                thread_id,
-                help_record: HelpRecord { 
-                    current_thread_id: 0, 
-                    last_phase, 
-                    next_check: HelpRecord::HELPING_DELAY 
-                }
-            })
+            Ok(thread_id)
         } else {
             Err(HandleError)
         }
@@ -779,18 +793,7 @@ impl<T> Queue<T, FpSpHandle> for FpSp<T> {
 
 impl<T> Drop for FpSp<T> {
     fn drop(&mut self) {
-        let last_phase = unsafe {
-            (*self.states[0].load(Ordering::Acquire)).phase
-        };
-        let mut handle = FpSpHandle {
-            thread_id: 0,
-            help_record: HelpRecord { 
-                current_thread_id: Node::<T>::INDEX_NONE, 
-                last_phase: last_phase, 
-                next_check: usize::MAX
-            }
-        };
-        while let Some(_) = self.dequeue(&mut handle) {}
+        while let Some(_) = self.dequeue(0) {}
         unsafe {
             _ = Box::from_raw(self.head.load_ptr(Ordering::Acquire));
             _ = Box::from_raw(self.opdesc_end as *mut OpDesc<T>);

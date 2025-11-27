@@ -163,9 +163,9 @@ pub struct CRTurnHandle {
 type Handle = CRTurnHandle;
 
 impl<T> Queue<T, CRTurnHandle> for CRTurn<T> {
-    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
-        let thread_id = handle.thread_id;
-        let my_node = Box::into_raw(Box::new(Node::new_with(item, handle.thread_id)));
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
+        let thread_id = handle;
+        let my_node = Box::into_raw(Box::new(Node::new_with(item, thread_id)));
         self.enqueuers[thread_id].store(my_node, Ordering::Release);
         for _ in 0..self.num_threads {
             if self.enqueuers[thread_id].load(Ordering::Acquire) == ptr::null_mut() {
@@ -204,8 +204,8 @@ impl<T> Queue<T, CRTurnHandle> for CRTurn<T> {
         Ok(())
     }
     
-    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
-        let thread_id = handle.thread_id;
+    fn dequeue(&self, handle: usize) -> Option<T> {
+        let thread_id = handle;
         let prev_request = self.deq_self[thread_id].load(Ordering::Acquire);
         let my_request = self.deq_help[thread_id].load(Ordering::Acquire);
         self.deq_self[thread_id].store(my_request, Ordering::Release);
@@ -257,12 +257,10 @@ impl<T> Queue<T, CRTurnHandle> for CRTurn<T> {
         Some(item)
     }
 
-    fn register(&self) -> HandleResult<Handle> {
+    fn register(&self) -> HandleResult {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
-            Ok(Handle {
-                thread_id,
-            })
+            Ok(thread_id)
         } else {
             Err(HandleError)
         }
@@ -274,7 +272,7 @@ impl<T> Drop for CRTurn<T> {
         unsafe {
             _ = *Box::from_raw(self.sentinal);
         }
-        while let Some(_) = self.dequeue(&mut CRTurnHandle { thread_id: 0 }) {}
+        while let Some(_) = self.dequeue(0) {}
         for val in &self.deq_self {
             unsafe {
                 _ = *Box::from_raw(val.load(Ordering::Acquire));

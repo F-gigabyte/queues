@@ -1,7 +1,7 @@
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::Instant};
+use std::{env, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread, time::Instant};
 
 
-use crate::{cc_queue::CCQueue, crturn::CRTurn, fp_sp::FpSp, lcrq::LCRQ, ms::{MSLockFree, MSLocking}, nblfq::{NBLFQDCas, NBLFQTagged}, queue::Queue, rcqb::RCQB, rcqd::RCQD, rcqs::RCQS, scq_cas::{LSCQ, SCQCas}, wcq::WCQ, wfq::WFQ, wfq_ms::MSWaitFree};
+use crate::{cc_queue::CCQueue, crturn::CRTurn, fp_sp::FpSp, lcrq::LCRQ, lock_queue::LockQueue, ms::{MSLockFree, MSLocking}, nblfq::{NBLFQDCas, NBLFQTagged}, queue::Queue, rcqb::RCQB, rcqd::RCQD, rcqs::RCQS, ring_buffer::RingBuffer, scq_cas::{SCQCas, LSCQ}, wcq::WCQ, wfq::WFQ, wfq_ms::MSWaitFree};
 
 pub mod queue;
 pub mod lock_queue;
@@ -24,36 +24,71 @@ pub mod rcqs;
 pub mod rcqd;
 pub mod ring_buffer;
 
-fn main() {
-    let num_threads = 64;
-    let items = Arc::new([10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160]);
-    //let queue = LockQueue::new(16);
-    let queue2 = Arc::new(LSCQ::new(4096, num_threads + 1));
+#[derive(Debug)]
+struct Message {
+    from: usize,
+    to: usize,
+    data: [usize; 500]
+}
 
+fn run_queue_producer_round<QUEUE, HANDLER>(queue: &Arc<QUEUE>, num_threads: usize) -> u128
+where 
+    QUEUE: Queue<Message, HANDLER> + Send + Sync + 'static
+{
     let mut threads = Vec::new();
     let begin_tasks = Arc::new(AtomicBool::new(false));
-
-    for i in 0..num_threads {
-        let queue2 = Arc::clone(&queue2);
-        let items = Arc::clone(&items);
+    for _ in 0..num_threads {
+        let queue = Arc::clone(&queue);
         let begin_tasks = Arc::clone(&begin_tasks);
         threads.push(thread::spawn(move || {
-            let mut handle = queue2.register().unwrap();
-            while !begin_tasks.load(Ordering::Acquire) {}
-            for item in *items {
-                queue2.enqueue((i, item), &mut handle).unwrap();
+            let mut handle = queue.register().unwrap();
+            while !begin_tasks.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            for _ in 0..1000 {
+                loop {
+                    if let Some(_) = queue.dequeue(&mut handle) {
+                        break;
+                    }
+                }
             }
         }));
     }
+    let mut handle = queue.register().unwrap();
     let start = Instant::now();
     begin_tasks.store(true, Ordering::Release);
+    for i in 0..num_threads * 1000 {
+        queue.enqueue(Message { from: num_threads + 1, to: i, data: [i; 500] }, &mut handle).unwrap();
+    }
     for thread in threads {
         thread.join().unwrap();
     }
-    let mut handle = queue2.register().unwrap();
-    while let Some(item) = queue2.dequeue(&mut handle) {
-        println!("Have item {item:?}");
-    }
     let duration = start.elapsed();
-    println!("Time {duration:?}");
+    duration.as_nanos()
+}
+
+fn run_queue_producer<QUEUE, HANDLER>(queue: &Arc<QUEUE>, rounds: usize) -> Vec<(usize, Vec<u128>)> 
+where
+    QUEUE: Queue<Message, HANDLER> + Send + Sync + 'static
+{
+    let mut results = Vec::new();
+    for i in 0..rounds {
+        let mut round_res = Vec::new();
+        let num_threads = (i + 1) * 10;
+        for _ in 0..5 {
+            _ = run_queue_producer_round(queue, num_threads)
+        }
+        println!("Round {i}");
+        for _ in 0..10 {
+            round_res.push(run_queue_producer_round(queue, num_threads));
+        }
+        results.push((i, round_res))
+    }
+    results
+}
+
+fn main() {
+    let num_threads = 64;
+    let queue = Arc::new(LockQueue::new(num_threads * 1000));
+    println!("{:?}", run_queue_producer(&queue, num_threads));
 }

@@ -44,13 +44,13 @@ impl<T> MSLockFree<T> {
 }
 
 impl<T> Queue<T, MSLockFreeHandle> for MSLockFree<T> {
-    fn enqueue(&self, item: T, handle: &mut Handle) -> EnqueueResult<T> {
+    fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
         let node = Box::into_raw(Box::new(LockFreeNode {
             value: CachePadded::new(MaybeUninit::new(item)),
             next: CachePadded::new(AtomicPtr::new(ptr::null_mut())),
         }));
         loop {
-            let tail = self.hazard.mark_ptr(handle.thread_id, 0, self.tail.load(Ordering::Acquire));
+            let tail = self.hazard.mark_ptr(handle, 0, self.tail.load(Ordering::Acquire));
             let next = unsafe {
                 (*tail).next.load(Ordering::Acquire)
             };
@@ -69,20 +69,20 @@ impl<T> Queue<T, MSLockFreeHandle> for MSLockFree<T> {
         Ok(())
     }
 
-    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
+    fn dequeue(&self, handle: usize) -> Option<T> {
         let mut data;
         let mut head;
         let mut next;
         loop {
-           head = self.hazard.mark_ptr(handle.thread_id, 0, self.head.load(Ordering::Acquire));
+           head = self.hazard.mark_ptr(handle, 0, self.head.load(Ordering::Acquire));
            let tail = self.tail.load(Ordering::Acquire);
-           next = self.hazard.mark_ptr(handle.thread_id, 1, unsafe{ (*head).next.load(Ordering::Acquire)});
+           next = self.hazard.mark_ptr(handle, 1, unsafe{ (*head).next.load(Ordering::Acquire)});
            if head != self.head.load(Ordering::Acquire) {
                continue;
            }
            if next.is_null() {
-               self.hazard.clear(handle.thread_id, 0);
-               self.hazard.clear(handle.thread_id, 1);
+               self.hazard.clear(handle, 0);
+               self.hazard.clear(handle, 1);
                return None
            }
            if head == tail {
@@ -93,18 +93,16 @@ impl<T> Queue<T, MSLockFreeHandle> for MSLockFree<T> {
            };
            if let Ok(_) = self.head.compare_exchange(head, next, Ordering::Release, Ordering::Relaxed) { break }
         }
-        self.hazard.clear(handle.thread_id, 0);
-        self.hazard.clear(handle.thread_id, 1);
-        self.hazard.retire(handle.thread_id, head);
+        self.hazard.clear(handle, 0);
+        self.hazard.clear(handle, 1);
+        self.hazard.retire(handle, head);
         Some(data)
     }
 
-    fn register(&self) -> HandleResult<Handle> {
+    fn register(&self) -> HandleResult {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
-            Ok(MSLockFreeHandle {
-                thread_id
-            })
+            Ok(thread_id)
         } else {
             Err(HandleError)
         }
@@ -159,7 +157,7 @@ impl<T> MSLocking<T> {
 }
 
 impl<T> Queue<T> for MSLocking<T> {
-    fn enqueue(&self, item: T, _: &mut ()) -> EnqueueResult<T> {
+    fn enqueue(&self, item: T, _: usize) -> EnqueueResult<T> {
         let node = NonNull::new(Box::into_raw(Box::new(Node {
             value: MaybeUninit::new(item),
             next: None,
@@ -174,7 +172,7 @@ impl<T> Queue<T> for MSLocking<T> {
         Ok(())
     }
 
-    fn dequeue(&self, _: &mut ()) -> Option<T> {
+    fn dequeue(&self, _: usize) -> Option<T> {
         let node;
         let data;
         {
@@ -198,8 +196,8 @@ impl<T> Queue<T> for MSLocking<T> {
         Some(data)
     }
 
-    fn register(&self) -> HandleResult<()> {
-        Ok(())
+    fn register(&self) -> HandleResult {
+        Ok(0)
     }
 }
 

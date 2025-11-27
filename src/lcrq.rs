@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, ptr::{self, null_mut}, sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
+use std::{marker::PhantomData, ptr, sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
 
 use crossbeam_utils::CachePadded;
 use hazard::{BoxMemory, Pointers};
@@ -152,7 +152,7 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
 }
 
 impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
-    fn enqueue(&self, val: T, _: &mut ()) -> EnqueueResult<T> {
+    fn enqueue(&self, val: T, _: usize) -> EnqueueResult<T> {
         let mut tries = 0;
         let val = Box::into_raw(Box::new(val));
         loop {
@@ -199,7 +199,7 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
         }
     }
     
-    fn dequeue(&self, _: &mut ()) -> Option<T> {
+    fn dequeue(&self, _: usize) -> Option<T> {
         loop {
             let h = self.head.fetch_add(1, Ordering::Acquire);
             let slot = &self.array[h % self.array.len()];
@@ -230,9 +230,11 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
                 }
             }
             let t = self.tail.load(Ordering::Acquire);
-            if CLOSABLE {
-                let t = t & !Self::CLOSED_MASK;
-            }
+            let t = if CLOSABLE {
+                t & !Self::CLOSED_MASK
+            } else {
+                t
+            };
             if t <= h + 1 {
                 self.fix_state();
                 return None;
@@ -241,8 +243,8 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
     }
 
 
-    fn register(&self) -> HandleResult<()> {
-        Ok(())
+    fn register(&self) -> HandleResult {
+        Ok(0)
     }
 }
 
@@ -318,9 +320,9 @@ impl<T, QUEUE> Queue<T, LCRQHandle> for LCRQ<T, QUEUE>
 where 
     QUEUE: RingBuffer<T>
 {
-    fn enqueue(&self, mut item: T, handle: &mut Handle) -> EnqueueResult<T> {
+    fn enqueue(&self, mut item: T, handle: usize) -> EnqueueResult<T> {
         loop {
-            let crq_ptr = self.hazard.mark(handle.thread_id, 0, &*self.tail);
+            let crq_ptr = self.hazard.mark(handle, 0, &*self.tail);
             let crq = unsafe {
                 &*crq_ptr
             };
@@ -329,66 +331,64 @@ where
                 let _ = self.tail.compare_exchange(crq_ptr, next, Ordering::Release, Ordering::Relaxed);
                 continue;
             }
-            match crq.node.enqueue(item, &mut ()) {
+            match crq.node.enqueue(item, handle) {
                 Ok(_) => {
-                    self.hazard.clear(handle.thread_id, 0);
+                    self.hazard.clear(handle, 0);
                     return Ok(())
                 },
                 Err(QueueFull(item2)) => {
                     item = item2;
                     let queue = QUEUE::new(self.ring_size);
-                    queue.enqueue(item, &mut ()).unwrap_or_else(|_| {
+                    queue.enqueue(item, handle).unwrap_or_else(|_| {
                         panic!("Have full queue with an empty queue");
                     });
                     let new_crq = Box::into_raw(Box::new(LCRQNode::new(queue)));
                     match crq.next.compare_exchange(ptr::null_mut(), new_crq, Ordering::Release, Ordering::Relaxed) {
                         Ok(_) => {
                             _ = self.tail.compare_exchange(crq_ptr, new_crq, Ordering::Release, Ordering::Relaxed);
-                            self.hazard.clear(handle.thread_id, 0);
+                            self.hazard.clear(handle, 0);
                             return Ok(());
                         },
                         Err(_) => {
                             let new_crq = unsafe {
                                 *Box::from_raw(new_crq)
                             };
-                            item = new_crq.node.dequeue(&mut ()).unwrap_or_else(|| {
+                            item = new_crq.node.dequeue(handle).unwrap_or_else(|| {
                                 panic!("Unable to retrieve enqueued item");
                             });
                         },
                     }
                 }
             }
-            self.hazard.clear(handle.thread_id, 0);
+            self.hazard.clear(handle, 0);
         }
     }
 
-    fn dequeue(&self, handle: &mut Handle) -> Option<T> {
+    fn dequeue(&self, handle: usize) -> Option<T> {
         loop {
-            let crq_ptr = self.hazard.mark(handle.thread_id, 0, &*self.head);
+            let crq_ptr = self.hazard.mark(handle, 0, &*self.head);
             let crq = unsafe {
                 &*crq_ptr
             };
-            if let Some(v) = crq.node.dequeue(&mut ()) {
-                self.hazard.clear(handle.thread_id, 0);
+            if let Some(v) = crq.node.dequeue(handle) {
+                self.hazard.clear(handle, 0);
                 return Some(v);
             }
             let next = crq.next.load(Ordering::Acquire);
             if next.is_null() {
-                self.hazard.clear(handle.thread_id, 0);
+                self.hazard.clear(handle, 0);
                 return None;
             }
-            self.hazard.clear(handle.thread_id, 0);
-            self.hazard.retire(handle.thread_id, crq_ptr);
+            self.hazard.clear(handle, 0);
+            self.hazard.retire(handle, crq_ptr);
             _ = self.head.compare_exchange_weak(crq_ptr, next, Ordering::Release, Ordering::Relaxed);
         }
     }
 
-    fn register(&self) -> HandleResult<Handle> {
+    fn register(&self) -> HandleResult {
         let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
         if thread_id < self.num_threads {
-            Ok(Handle {
-                thread_id
-            })
+            Ok(thread_id)
         } else {
             Err(HandleError)
         }
