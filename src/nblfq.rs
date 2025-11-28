@@ -141,6 +141,9 @@ impl<T> Queue<T> for NBLFQTagged<T> {
     }
 }
 
+unsafe impl<T> Send for NBLFQTagged<T> {}
+unsafe impl<T> Sync for NBLFQTagged<T> {}
+
 #[derive(Debug)]
 pub struct NBLFQDCas<T> {
     array: Box<[CachePadded<AtomicDUsize>]>,
@@ -318,3 +321,6 @@ impl<T> Queue<T> for NBLFQDCas<T> {
     }
 
 }
+
+unsafe impl<T> Send for NBLFQDCas<T> {}
+unsafe impl<T> Sync for NBLFQDCas<T> {}

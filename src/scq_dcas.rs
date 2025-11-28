@@ -50,12 +50,23 @@
 /// IN THE SOFTWARE.
 ///
 /// ----------------------------------------------------------------------------
-
-use std::{cell::UnsafeCell, cmp, marker::PhantomData, ptr, sync::atomic::{AtomicIsize, AtomicUsize, Ordering}, usize};
+use std::{
+    cell::UnsafeCell,
+    cmp,
+    marker::PhantomData,
+    ptr,
+    sync::atomic::{AtomicIsize, AtomicUsize, Ordering},
+    usize,
+};
 
 use crossbeam_utils::CachePadded;
 
-use crate::{atomic_types::{AtomicDUsize, DUsize}, lcrq::LCRQ, queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull}, ring_buffer::RingBuffer};
+use crate::{
+    atomic_types::{AtomicDUsize, DUsize},
+    lcrq::LCRQ,
+    queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull},
+    ring_buffer::RingBuffer,
+};
 
 #[derive(Debug)]
 pub struct SCQDCasHandle {
@@ -93,11 +104,13 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
         // LEN greater than 0
         assert!(len > 0);
         let n = len * 2;
-        let data: Box<[CachePadded<AtomicDUsize>]> = (0..n).map(|_| CachePadded::new(AtomicDUsize::new(0))).collect();
-        Self { 
-            head: CachePadded::new(AtomicUsize::new(n)), 
-            threshold: CachePadded::new(AtomicIsize::new(-1)), 
-            tail: CachePadded::new(AtomicUsize::new(n)), 
+        let data: Box<[CachePadded<AtomicDUsize>]> = (0..n)
+            .map(|_| CachePadded::new(AtomicDUsize::new(0)))
+            .collect();
+        Self {
+            head: CachePadded::new(AtomicUsize::new(n)),
+            threshold: CachePadded::new(AtomicIsize::new(-1)),
+            tail: CachePadded::new(AtomicUsize::new(n)),
             array: data,
             _phantom: PhantomData,
         }
@@ -105,25 +118,17 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
 
     fn get_array_entry(array_pair: &AtomicDUsize) -> &AtomicUsize {
         if cfg!(target_endian = "little") {
-            unsafe {
-                AtomicUsize::from_ptr((array_pair.as_ptr() as *mut usize).add(1))
-            }
+            unsafe { AtomicUsize::from_ptr((array_pair.as_ptr() as *mut usize).add(1)) }
         } else {
-            unsafe {
-                AtomicUsize::from_ptr(array_pair.as_ptr() as *mut usize)
-            }
+            unsafe { AtomicUsize::from_ptr(array_pair.as_ptr() as *mut usize) }
         }
     }
-    
+
     fn get_array_pointer(array_pair: &AtomicDUsize) -> &AtomicUsize {
         if cfg!(target_endian = "little") {
-            unsafe {
-                AtomicUsize::from_ptr(array_pair.as_ptr() as *mut usize)
-            }
+            unsafe { AtomicUsize::from_ptr(array_pair.as_ptr() as *mut usize) }
         } else {
-            unsafe {
-                AtomicUsize::from_ptr((array_pair.as_ptr() as *mut usize).add(1))
-            }
+            unsafe { AtomicUsize::from_ptr((array_pair.as_ptr() as *mut usize).add(1)) }
         }
     }
 
@@ -147,44 +152,47 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
         if tail >= *lhead + n {
             *lhead = self.head.load(Ordering::Acquire);
             if tail >= *lhead + n {
-                let item = unsafe {
-                    *Box::from_raw(item)
-                };
+                let item = unsafe { *Box::from_raw(item) };
                 return Err(QueueFull(item));
             }
         }
         loop {
             let tail = self.tail.fetch_add(1, Ordering::Acquire);
-            if CLOSABLE
-                && tail & Self::CLOSED_MASK != 0 {
-                    let item = unsafe {
-                        *Box::from_raw(item)
-                    };
-                    return Err(QueueFull(item));
-                }
+            if CLOSABLE && tail & Self::CLOSED_MASK != 0 {
+                let item = unsafe { *Box::from_raw(item) };
+                return Err(QueueFull(item));
+            }
             let tail_cycle = tail & !(n - 1);
             let tail_index = tail % n;
-            let pair = self.array[tail_index].load(Ordering::Acquire);
+            let mut pair = self.array[tail_index].load(Ordering::Acquire);
 
             // retry:
             'retry: loop {
                 let entry = Self::get_entry(pair);
                 let entry_cycle = entry & !(n - 1);
-                if compare_signed(entry_cycle, tail_cycle, cmp::Ordering::Less) && 
-                    (entry == entry_cycle || 
-                     ((entry == (entry_cycle | 0x2)) && self.head.load(Ordering::Acquire) <= tail)) {
-                        match self.array[tail_index].compare_exchange_weak(pair, Self::create_pair(tail_cycle | 1, item), Ordering::Acquire, Ordering::Relaxed) {
-                            Ok(_) => {
-                                if self.threshold.load(Ordering::Acquire) != Self::threshold4(n) {
-                                    self.threshold.store(Self::threshold4(n), Ordering::Release);
-                                }
-                                return Ok(());
-                            },
-                            Err(_) => {
-                                // goto retry
-                                continue 'retry;
+                if compare_signed(entry_cycle, tail_cycle, cmp::Ordering::Less)
+                    && (entry == entry_cycle
+                        || ((entry == (entry_cycle | 0x2))
+                            && self.head.load(Ordering::Acquire) <= tail))
+                {
+                    match self.array[tail_index].compare_exchange_weak(
+                        pair,
+                        Self::create_pair(tail_cycle | 1, item),
+                        Ordering::Acquire,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            if self.threshold.load(Ordering::Acquire) != Self::threshold4(n) {
+                                self.threshold.store(Self::threshold4(n), Ordering::Release);
                             }
+                            return Ok(());
                         }
+                        Err(val) => {
+                            pair = val;
+                            // goto retry
+                            continue 'retry;
+                        }
+                    }
                 } else {
                     // return to main loop
                     break 'retry;
@@ -193,9 +201,7 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
             if tail + 1 >= *lhead + n {
                 *lhead = self.head.load(Ordering::Acquire);
                 if tail + 1 >= *lhead + n {
-                    let item = unsafe {
-                        *Box::from_raw(item)
-                    };
+                    let item = unsafe { *Box::from_raw(item) };
                     return Err(QueueFull(item));
                 }
             }
@@ -204,7 +210,10 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
 
     fn catchup(&self, mut tail: usize, mut head: usize) {
         loop {
-            match self.tail.compare_exchange_weak(tail, head, Ordering::Acquire, Ordering::Relaxed) {
+            match self
+                .tail
+                .compare_exchange_weak(tail, head, Ordering::Acquire, Ordering::Relaxed)
+            {
                 Ok(_) => break,
                 Err(_) => {
                     head = self.head.load(Ordering::Acquire);
@@ -227,16 +236,15 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
             let head = self.head.fetch_add(1, Ordering::Acquire);
             let head_cycle = head & !(n - 1);
             let head_index = head % n;
-            let entry = Self::get_array_entry(&self.array[head_index]).load(Ordering::Acquire);
+            let mut entry = Self::get_array_entry(&self.array[head_index]).load(Ordering::Acquire);
             let mut entry_new;
             'inner: loop {
                 let entry_cycle = entry & !(n - 1);
                 if entry_cycle == head_cycle {
-                    let pair = self.array[head_index].fetch_and(Self::create_pair(!0x1, ptr::null_mut()), Ordering::Release);
+                    let pair = self.array[head_index]
+                        .fetch_and(Self::create_pair(!0x1, ptr::null_mut()), Ordering::Acquire);
                     let ptr = Self::get_pointer(pair);
-                    let item = unsafe {
-                        *Box::from_raw(ptr as *mut T)
-                    };
+                    let item = unsafe { *Box::from_raw(ptr as *mut T) };
                     return Some(item);
                 }
                 if (entry & (!0x2)) != entry_cycle {
@@ -251,8 +259,13 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
                 if !compare_signed(entry_cycle, head_cycle, cmp::Ordering::Less) {
                     break 'inner;
                 }
-                if Self::get_array_entry(&self.array[head_index]).compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed).is_ok() { 
-                    break 'inner; 
+                match Self::get_array_entry(&self.array[head_index])
+                    .compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed)
+                {
+                    Ok(_) => break 'inner,
+                    Err(val) => {
+                        entry = val;
+                    }
                 }
             }
             let tail = self.tail.load(Ordering::Acquire);
@@ -289,21 +302,21 @@ pub struct SCQDCas<T, const CLOSABLE: bool> {
 
 impl<T, const CLOSABLE: bool> SCQDCas<T, CLOSABLE> {
     fn create_handle(len: usize) -> SCQDCasHandle {
-        SCQDCasHandle {
-            lhead: len * 2,
-        }
+        SCQDCasHandle { lhead: len * 2 }
     }
 }
 
 impl<T> RingBuffer<T> for SCQDCas<T, true> {
     fn new(len: usize, num_threads: usize) -> Self {
         let len = len.next_power_of_two();
-        let handles: Box<[CachePadded<UnsafeCell<SCQDCasHandle>>]> = (0..num_threads).map(|_| CachePadded::new(UnsafeCell::new(Self::create_handle(len)))).collect();
-        Self { 
+        let handles: Box<[CachePadded<UnsafeCell<SCQDCasHandle>>]> = (0..num_threads)
+            .map(|_| CachePadded::new(UnsafeCell::new(Self::create_handle(len))))
+            .collect();
+        Self {
             ring: SCQDCasRing::new_empty(len),
             handles,
             current_thread: AtomicUsize::new(0),
-            num_threads
+            num_threads,
         }
     }
 }
@@ -311,21 +324,21 @@ impl<T> RingBuffer<T> for SCQDCas<T, true> {
 impl<T> RingBuffer<T> for SCQDCas<T, false> {
     fn new(len: usize, num_threads: usize) -> Self {
         let len = len.next_power_of_two();
-        let handles: Box<[CachePadded<UnsafeCell<SCQDCasHandle>>]> = (0..num_threads).map(|_| CachePadded::new(UnsafeCell::new(Self::create_handle(len)))).collect();
-        Self { 
+        let handles: Box<[CachePadded<UnsafeCell<SCQDCasHandle>>]> = (0..num_threads)
+            .map(|_| CachePadded::new(UnsafeCell::new(Self::create_handle(len))))
+            .collect();
+        Self {
             ring: SCQDCasRing::new_empty(len),
             handles,
             current_thread: AtomicUsize::new(0),
-            num_threads
+            num_threads,
         }
     }
 }
 
 impl<T> Queue<T> for SCQDCas<T, true> {
     fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
-        let handle = unsafe {
-            &mut *self.handles[handle].get()
-        };
+        let handle = unsafe { &mut *self.handles[handle].get() };
         match self.ring.enqueue(item, &mut handle.lhead) {
             Ok(_) => Ok(()),
             Err(err) => {
@@ -351,9 +364,7 @@ impl<T> Queue<T> for SCQDCas<T, true> {
 
 impl<T> Queue<T> for SCQDCas<T, false> {
     fn enqueue(&self, item: T, handle: usize) -> EnqueueResult<T> {
-        let handle = unsafe {
-            &mut *self.handles[handle].get()
-        };
+        let handle = unsafe { &mut *self.handles[handle].get() };
         self.ring.enqueue(item, &mut handle.lhead)
     }
 
@@ -370,7 +381,6 @@ impl<T> Queue<T> for SCQDCas<T, false> {
         }
     }
 }
-
 
 impl<T, const CLOSABLE: bool> Drop for SCQDCas<T, CLOSABLE> {
     fn drop(&mut self) {

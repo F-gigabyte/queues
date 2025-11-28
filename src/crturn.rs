@@ -24,9 +24,12 @@
 /// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 /// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 /// *****************************************************************************
-
 use portable_atomic::{AtomicPtr, AtomicUsize};
-use std::{mem::{self, MaybeUninit}, ptr, sync::atomic::Ordering};
+use std::{
+    mem::{self, MaybeUninit},
+    ptr,
+    sync::atomic::Ordering,
+};
 
 use crossbeam_utils::CachePadded;
 use hazard::{BoxMemory, Pointers};
@@ -38,7 +41,7 @@ struct Node<T> {
     item: MaybeUninit<T>,
     enq_thread_id: usize,
     deq_thread_id: AtomicUsize,
-    next: AtomicPtr<Node<T>>
+    next: AtomicPtr<Node<T>>,
 }
 
 impl<T> Node<T> {
@@ -48,7 +51,7 @@ impl<T> Node<T> {
             item: MaybeUninit::uninit(),
             enq_thread_id: thread_id,
             deq_thread_id: AtomicUsize::new(Self::INDEX_NONE),
-            next: AtomicPtr::new(ptr::null_mut())
+            next: AtomicPtr::new(ptr::null_mut()),
         }
     }
     pub fn new_with(item: T, thread_id: usize) -> Self {
@@ -56,7 +59,7 @@ impl<T> Node<T> {
             item: MaybeUninit::new(item),
             enq_thread_id: thread_id,
             deq_thread_id: AtomicUsize::new(Self::INDEX_NONE),
-            next: AtomicPtr::new(ptr::null_mut())
+            next: AtomicPtr::new(ptr::null_mut()),
         }
     }
 }
@@ -71,7 +74,7 @@ pub struct CRTurn<T> {
     hazard: Pointers<Node<T>, BoxMemory>,
     sentinal: *mut Node<T>,
     current_thread: AtomicUsize,
-    num_threads: usize
+    num_threads: usize,
 }
 
 impl<T> CRTurn<T> {
@@ -82,17 +85,21 @@ impl<T> CRTurn<T> {
     const INDEX_NONE: usize = usize::MAX;
     pub fn new(num_threads: usize) -> Self {
         let sentinal = Box::into_raw(Box::new(Node::new(0)));
-        let enqueuers: Box<[CachePadded<AtomicPtr<Node<T>>>]> = (0..num_threads).map(|_| {
-            CachePadded::new(AtomicPtr::new(ptr::null_mut()))
-        }).collect();
-        let deq_self: Box<[CachePadded<AtomicPtr<Node<T>>>]> = (0..num_threads).map(|_| {
-            let node = Box::into_raw(Box::new(Node::new(0)));
-            CachePadded::new(AtomicPtr::new(node))
-        }).collect();
-        let deq_help: Box<[CachePadded<AtomicPtr<Node<T>>>]> = (0..num_threads).map(|_| {
-            let node = Box::into_raw(Box::new(Node::new(0)));
-            CachePadded::new(AtomicPtr::new(node))
-        }).collect();
+        let enqueuers: Box<[CachePadded<AtomicPtr<Node<T>>>]> = (0..num_threads)
+            .map(|_| CachePadded::new(AtomicPtr::new(ptr::null_mut())))
+            .collect();
+        let deq_self: Box<[CachePadded<AtomicPtr<Node<T>>>]> = (0..num_threads)
+            .map(|_| {
+                let node = Box::into_raw(Box::new(Node::new(0)));
+                CachePadded::new(AtomicPtr::new(node))
+            })
+            .collect();
+        let deq_help: Box<[CachePadded<AtomicPtr<Node<T>>>]> = (0..num_threads)
+            .map(|_| {
+                let node = Box::into_raw(Box::new(Node::new(0)));
+                CachePadded::new(AtomicPtr::new(node))
+            })
+            .collect();
         Self {
             sentinal,
             head: CachePadded::new(AtomicPtr::new(sentinal)),
@@ -110,45 +117,78 @@ impl<T> CRTurn<T> {
         let turn = head.deq_thread_id.load(Ordering::Acquire) % self.num_threads;
         for i in turn + 1..turn + self.num_threads + 1 {
             let id_deq = i % self.num_threads;
-            if self.deq_self[id_deq].load(Ordering::Acquire) != self.deq_help[id_deq].load(Ordering::Acquire) {
+            if self.deq_self[id_deq].load(Ordering::Acquire)
+                != self.deq_help[id_deq].load(Ordering::Acquire)
+            {
                 continue;
             }
             if next.deq_thread_id.load(Ordering::Acquire) == Self::INDEX_NONE {
-                _ = next.deq_thread_id.compare_exchange(Self::INDEX_NONE, id_deq, Ordering::Release, Ordering::Relaxed);
+                _ = next.deq_thread_id.compare_exchange(
+                    Self::INDEX_NONE,
+                    id_deq,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                );
             }
             break;
         }
         next.deq_thread_id.load(Ordering::Acquire)
     }
 
-    fn cas_dequeue_and_head(&self, head_ptr: *const Node<T>, next_ptr: *const Node<T>, thread_id: usize) {
-        let next = unsafe {
-            &*next_ptr
-        };
+    fn cas_dequeue_and_head(
+        &self,
+        head_ptr: *const Node<T>,
+        next_ptr: *const Node<T>,
+        thread_id: usize,
+    ) {
+        let next = unsafe { &*next_ptr };
         let deq_thread_id = next.deq_thread_id.load(Ordering::Acquire);
         if deq_thread_id == thread_id {
             self.deq_help[deq_thread_id].store(next_ptr as *mut Node<T>, Ordering::Release);
         } else {
-            let deq_help = self.hazard.mark_ptr(thread_id, Self::HAZARD_DEQUEUE, self.deq_help[deq_thread_id].load(Ordering::Acquire));
+            let deq_help = self.hazard.mark_ptr(
+                thread_id,
+                Self::HAZARD_DEQUEUE,
+                self.deq_help[deq_thread_id].load(Ordering::Acquire),
+            );
             if !std::ptr::eq(deq_help, next_ptr) && head_ptr != self.head.load(Ordering::Acquire) {
-                _ = self.deq_help[deq_thread_id].compare_exchange(deq_help, next_ptr as *mut Node<T>, Ordering::Release, Ordering::Relaxed);
+                _ = self.deq_help[deq_thread_id].compare_exchange(
+                    deq_help,
+                    next_ptr as *mut Node<T>,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                );
             }
         }
-        _ = self.head.compare_exchange(head_ptr as *mut Node<T>, next_ptr as *mut Node<T>, Ordering::Release, Ordering::Relaxed);
+        _ = self.head.compare_exchange(
+            head_ptr as *mut Node<T>,
+            next_ptr as *mut Node<T>,
+            Ordering::Release,
+            Ordering::Relaxed,
+        );
     }
 
     fn give_up(&self, my_request: *const Node<T>, thread_id: usize) {
         let head = self.head.load(Ordering::Acquire);
-        if !std::ptr::eq(self.deq_help[thread_id].load(Ordering::Acquire), my_request) || head == self.tail.load(Ordering::Acquire) {
+        if !std::ptr::eq(self.deq_help[thread_id].load(Ordering::Acquire), my_request)
+            || head == self.tail.load(Ordering::Acquire)
+        {
             return;
         }
-        let next = self.hazard.mark_ptr(thread_id, Self::HAZARD_NEXT, unsafe {(*head).next.load(Ordering::Acquire)});
+        let next = self.hazard.mark_ptr(thread_id, Self::HAZARD_NEXT, unsafe {
+            (*head).next.load(Ordering::Acquire)
+        });
         if head != self.head.load(Ordering::Acquire) {
             return;
         }
-        if self.search_next(unsafe {&*head}, unsafe {&*next}) == Self::INDEX_NONE {
+        if self.search_next(unsafe { &*head }, unsafe { &*next }) == Self::INDEX_NONE {
             unsafe {
-                _ = (*next).deq_thread_id.compare_exchange(Self::INDEX_NONE, thread_id, Ordering::Release, Ordering::Relaxed);
+                _ = (*next).deq_thread_id.compare_exchange(
+                    Self::INDEX_NONE,
+                    thread_id,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                );
             }
         }
         self.cas_dequeue_and_head(head, next, thread_id);
@@ -167,27 +207,45 @@ impl<T> Queue<T> for CRTurn<T> {
                 self.hazard.clear(thread_id, Self::HAZARD_DEQUEUE);
                 return Ok(());
             }
-            let tail_ptr = self.hazard.mark_ptr(thread_id, Self::HAZARD_TAIL, self.tail.load(Ordering::Acquire));
+            let tail_ptr = self.hazard.mark_ptr(
+                thread_id,
+                Self::HAZARD_TAIL,
+                self.tail.load(Ordering::Acquire),
+            );
             if tail_ptr != self.tail.load(Ordering::Acquire) {
                 continue;
             }
-            let tail = unsafe {
-                &*tail_ptr
-            };
+            let tail = unsafe { &*tail_ptr };
             if self.enqueuers[tail.enq_thread_id].load(Ordering::Acquire) == tail_ptr {
-                _ = self.enqueuers[tail.enq_thread_id].compare_exchange(tail_ptr, ptr::null_mut(), Ordering::Release, Ordering::Relaxed);
+                _ = self.enqueuers[tail.enq_thread_id].compare_exchange(
+                    tail_ptr,
+                    ptr::null_mut(),
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                );
             }
             for j in 1..self.num_threads + 1 {
-                let node_help = self.enqueuers[(j + tail.enq_thread_id) % self.num_threads].load(Ordering::Acquire);
+                let node_help = self.enqueuers[(j + tail.enq_thread_id) % self.num_threads]
+                    .load(Ordering::Acquire);
                 if node_help.is_null() {
                     continue;
                 }
-                _ = tail.next.compare_exchange(ptr::null_mut(), node_help, Ordering::Release, Ordering::Relaxed);
+                _ = tail.next.compare_exchange(
+                    ptr::null_mut(),
+                    node_help,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                );
                 break;
             }
             let next = tail.next.load(Ordering::Acquire);
             if !next.is_null() {
-                _ = self.tail.compare_exchange(tail_ptr, next, Ordering::Release, Ordering::Relaxed);
+                _ = self.tail.compare_exchange(
+                    tail_ptr,
+                    next,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                );
             }
         }
         self.enqueuers[thread_id].store(ptr::null_mut(), Ordering::Release);
@@ -196,7 +254,7 @@ impl<T> Queue<T> for CRTurn<T> {
         self.hazard.clear(thread_id, Self::HAZARD_DEQUEUE);
         Ok(())
     }
-    
+
     fn dequeue(&self, handle: usize) -> Option<T> {
         let thread_id = handle;
         let prev_request = self.deq_self[thread_id].load(Ordering::Acquire);
@@ -206,7 +264,11 @@ impl<T> Queue<T> for CRTurn<T> {
             if self.deq_help[thread_id].load(Ordering::Acquire) != my_request {
                 break;
             }
-            let head_ptr = self.hazard.mark_ptr(thread_id, Self::HAZARD_HEAD, self.head.load(Ordering::Acquire));
+            let head_ptr = self.hazard.mark_ptr(
+                thread_id,
+                Self::HAZARD_HEAD,
+                self.head.load(Ordering::Acquire),
+            );
             if head_ptr != self.head.load(Ordering::Acquire) {
                 continue;
             }
@@ -223,11 +285,13 @@ impl<T> Queue<T> for CRTurn<T> {
                 return None;
             }
 
-            let head = unsafe {
-                &*head_ptr
-            };
+            let head = unsafe { &*head_ptr };
 
-            let next = self.hazard.mark_ptr(thread_id, Self::HAZARD_NEXT, head.next.load(Ordering::Acquire));
+            let next = self.hazard.mark_ptr(
+                thread_id,
+                Self::HAZARD_NEXT,
+                head.next.load(Ordering::Acquire),
+            );
             if head_ptr != self.head.load(Ordering::Acquire) {
                 continue;
             }
@@ -236,17 +300,24 @@ impl<T> Queue<T> for CRTurn<T> {
             }
         }
         let my_node = self.deq_help[thread_id].load(Ordering::Acquire);
-        let head = self.hazard.mark_ptr(thread_id, Self::HAZARD_HEAD, self.head.load(Ordering::Acquire));
-        if head == self.head.load(Ordering::Acquire) && my_node == unsafe {(*head).next.load(Ordering::Acquire)} {
-            _ = self.head.compare_exchange(head, my_node, Ordering::Release, Ordering::Relaxed);
+        let head = self.hazard.mark_ptr(
+            thread_id,
+            Self::HAZARD_HEAD,
+            self.head.load(Ordering::Acquire),
+        );
+        if head == self.head.load(Ordering::Acquire)
+            && my_node == unsafe { (*head).next.load(Ordering::Acquire) }
+        {
+            _ = self
+                .head
+                .compare_exchange(head, my_node, Ordering::Release, Ordering::Relaxed);
         }
         self.hazard.clear(thread_id, Self::HAZARD_HEAD);
         self.hazard.clear(thread_id, Self::HAZARD_NEXT);
         self.hazard.clear(thread_id, Self::HAZARD_DEQUEUE);
         self.hazard.retire(thread_id, prev_request);
-        let item = unsafe {
-            mem::replace(&mut (*my_node).item, MaybeUninit::uninit()).assume_init()
-        };
+        let item =
+            unsafe { mem::replace(&mut (*my_node).item, MaybeUninit::uninit()).assume_init() };
         Some(item)
     }
 

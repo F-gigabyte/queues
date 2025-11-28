@@ -174,7 +174,7 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
                         }
             }
             let h = self.head.load(Ordering::Acquire);
-            if t - h >= self.array.len() {
+            if (t - h) as i64 >= self.array.len() as i64 {
                 if self.close(t, tries) {
                     if CLOSABLE {
                         self.tail.fetch_or(Self::CLOSED_MASK, Ordering::Release);
@@ -193,6 +193,7 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
     fn dequeue(&self, _: usize) -> Option<T> {
         loop {
             let h = self.head.fetch_add(1, Ordering::Acquire);
+            println!("h is {h}");
             let slot = &self.array[h % self.array.len()];
             let node = Node::<T>::from(slot.load(Ordering::Acquire));
             loop {
