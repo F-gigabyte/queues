@@ -148,16 +148,16 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
         let item = Box::into_raw(Box::new(item));
         let n = self.array.len();
 
-        let tail = self.tail.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::SeqCst);
         if tail >= *lhead + n {
-            *lhead = self.head.load(Ordering::Acquire);
+            *lhead = self.head.load(Ordering::SeqCst);
             if tail >= *lhead + n {
                 let item = unsafe { *Box::from_raw(item) };
                 return Err(QueueFull(item));
             }
         }
         loop {
-            let tail = self.tail.fetch_add(1, Ordering::Acquire);
+            let tail = self.tail.fetch_add(1, Ordering::AcqRel);
             if CLOSABLE && tail & Self::CLOSED_MASK != 0 {
                 let item = unsafe { *Box::from_raw(item) };
                 return Err(QueueFull(item));
@@ -178,12 +178,12 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
                     match self.array[tail_index].compare_exchange_weak(
                         pair,
                         Self::create_pair(tail_cycle | 1, item),
+                        Ordering::AcqRel,
                         Ordering::Acquire,
-                        Ordering::Relaxed,
                     ) {
                         Ok(_) => {
-                            if self.threshold.load(Ordering::Acquire) != Self::threshold4(n) {
-                                self.threshold.store(Self::threshold4(n), Ordering::Release);
+                            if self.threshold.load(Ordering::SeqCst) != Self::threshold4(n) {
+                                self.threshold.store(Self::threshold4(n), Ordering::SeqCst);
                             }
                             return Ok(());
                         }
@@ -199,7 +199,7 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
                 }
             }
             if tail + 1 >= *lhead + n {
-                *lhead = self.head.load(Ordering::Acquire);
+                *lhead = self.head.load(Ordering::SeqCst);
                 if tail + 1 >= *lhead + n {
                     let item = unsafe { *Box::from_raw(item) };
                     return Err(QueueFull(item));
@@ -212,7 +212,7 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
         loop {
             match self
                 .tail
-                .compare_exchange_weak(tail, head, Ordering::Acquire, Ordering::Relaxed)
+                .compare_exchange_weak(tail, head, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => break,
                 Err(_) => {
@@ -228,12 +228,12 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
 
     pub fn dequeue(&self) -> Option<T> {
         let n = self.array.len();
-        if self.threshold.load(Ordering::Acquire) < 0 {
+        if self.threshold.load(Ordering::SeqCst) < 0 {
             return None;
         }
 
         loop {
-            let head = self.head.fetch_add(1, Ordering::Acquire);
+            let head = self.head.fetch_add(1, Ordering::AcqRel);
             let head_cycle = head & !(n - 1);
             let head_index = head % n;
             let mut entry = Self::get_array_entry(&self.array[head_index]).load(Ordering::Acquire);
@@ -242,7 +242,7 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
                 let entry_cycle = entry & !(n - 1);
                 if entry_cycle == head_cycle {
                     let pair = self.array[head_index]
-                        .fetch_and(Self::create_pair(!0x1, ptr::null_mut()), Ordering::Acquire);
+                        .fetch_and(Self::create_pair(!0x1, ptr::null_mut()), Ordering::AcqRel);
                     let ptr = Self::get_pointer(pair);
                     let item = unsafe { *Box::from_raw(ptr as *mut T) };
                     return Some(item);
@@ -260,7 +260,7 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
                     break 'inner;
                 }
                 match Self::get_array_entry(&self.array[head_index])
-                    .compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed)
+                    .compare_exchange_weak(entry, entry_new, Ordering::AcqRel, Ordering::Acquire)
                 {
                     Ok(_) => break 'inner,
                     Err(val) => {
@@ -276,10 +276,10 @@ impl<T, const CLOSABLE: bool> SCQDCasRing<T, CLOSABLE> {
             };
             if !compare_signed(tail, head + 1, cmp::Ordering::Greater) {
                 self.catchup(tail, head + 1);
-                self.threshold.fetch_sub(1, Ordering::Release);
+                self.threshold.fetch_sub(1, Ordering::AcqRel);
                 return None;
             }
-            if self.threshold.fetch_sub(1, Ordering::Acquire) <= 0 {
+            if self.threshold.fetch_sub(1, Ordering::AcqRel) <= 0 {
                 return None;
             }
         }
@@ -353,7 +353,7 @@ impl<T> Queue<T> for SCQDCas<T, true> {
     }
 
     fn register(&self) -> HandleResult {
-        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        let thread_id = self.current_thread.fetch_add(1, Ordering::AcqRel);
         if thread_id < self.num_threads {
             Ok(thread_id)
         } else {
@@ -373,7 +373,7 @@ impl<T> Queue<T> for SCQDCas<T, false> {
     }
 
     fn register(&self) -> HandleResult {
-        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        let thread_id = self.current_thread.fetch_add(1, Ordering::AcqRel);
         if thread_id < self.num_threads {
             Ok(thread_id)
         } else {

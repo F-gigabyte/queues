@@ -102,7 +102,7 @@ impl<T> Queue<T> for CCQueue<T> {
     }
 
     fn register(&self) -> HandleResult {
-        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        let thread_id = self.current_thread.fetch_add(1, Ordering::AcqRel);
         if thread_id < self.num_threads {
             Ok(thread_id)
         } else {

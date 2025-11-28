@@ -109,7 +109,7 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
         let n = len * 2;
         let data: Box<[CachePadded<AtomicUsize>]> = (0..n).map(|_| CachePadded::new(AtomicUsize::new(usize::MAX))).collect();
         for i in 0..len {
-            data[i].store(n + i % len, Ordering::Release);
+            data[i].store(n + i % len, Ordering::Relaxed);
         }
         Self { 
             head: CachePadded::new(AtomicUsize::new(0)), 
@@ -118,7 +118,6 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
             array: data, 
         }
     }
-
     pub fn new_fill(len: usize, start: usize, end: usize) -> Self {
         // LEN must be a power of 2
         assert!(len & (len - 1) == 0);
@@ -130,10 +129,10 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
         assert!(end < n);
         let array: Box<[CachePadded<AtomicUsize>]> = (0..n).map(|_| CachePadded::new(AtomicUsize::new(usize::MAX))).collect();
         for i in 0..start {
-            array[i % n].store(2 * n - 1, Ordering::Release);
+            array[i % n].store(2 * n - 1, Ordering::Relaxed);
         }
         for i in start..end {
-            array[i % n].store(n + i, Ordering::Release);
+            array[i % n].store(n + i, Ordering::Relaxed);
         }
         Self { 
             head: CachePadded::new(AtomicUsize::new(start)), 
@@ -147,14 +146,14 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
         let n = self.array.len();
         elem ^= n - 1;
         loop {
-            let tail = self.tail.fetch_add(1, Ordering::Acquire);
+            let tail = self.tail.fetch_add(1, Ordering::AcqRel);
             if CLOSABLE
                 && tail & Self::CLOSED_MASK != 0 {
                     return Err(QueueFull(()));
                 }
             let tail_cycle = (tail << 1) | (2 * n - 1);
             let tail_index = tail % n;
-            let entry = self.array[tail_index].load(Ordering::Acquire);
+            let mut entry = self.array[tail_index].load(Ordering::Acquire);
 
             // retry:
             'retry: loop {
@@ -164,14 +163,15 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
                 if compare_signed(entry_cycle, tail_cycle, cmp::Ordering::Less) && 
                     (entry == entry_cycle || 
                      ((entry == (entry_cycle ^ n)) && !compare_signed(self.head.load(Ordering::Acquire), tail, cmp::Ordering::Greater))) {
-                        match self.array[tail_index].compare_exchange_weak(entry, tail_cycle ^ elem, Ordering::Acquire, Ordering::Relaxed) {
+                        match self.array[tail_index].compare_exchange_weak(entry, tail_cycle ^ elem, Ordering::AcqRel, Ordering::Acquire) {
                             Ok(_) => {
-                                if self.threshold.load(Ordering::Acquire) != Self::threshold3(n) {
-                                    self.threshold.store(Self::threshold3(n), Ordering::Release);
+                                if self.threshold.load(Ordering::SeqCst) != Self::threshold3(n) {
+                                    self.threshold.store(Self::threshold3(n), Ordering::SeqCst);
                                 }
                                 return Ok(());
                             },
-                            Err(_) => {
+                            Err(val) => {
+                                entry = val;
                                 // goto retry
                                 continue 'retry;
                             }
@@ -186,7 +186,7 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
 
     fn catchup(&self, mut tail: usize, mut head: usize) {
         loop {
-            match self.tail.compare_exchange_weak(tail, head, Ordering::Acquire, Ordering::Relaxed) {
+            match self.tail.compare_exchange_weak(tail, head, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => break,
                 Err(_) => {
                     head = self.head.load(Ordering::Acquire);
@@ -201,22 +201,22 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
 
     pub fn dequeue(&self) -> Option<usize> {
         let n = self.array.len();
-        if self.threshold.load(Ordering::Acquire) < 0 {
+        if self.threshold.load(Ordering::SeqCst) < 0 {
             return None;
         }
 
         loop {
-            let head = self.head.fetch_add(1, Ordering::Acquire);
+            let head = self.head.fetch_add(1, Ordering::AcqRel);
             let head_cycle = (head << 1) | (2 * n - 1);
             let head_index = head % n;
             let mut attempt = 0;
             'again: loop {
-                let entry = self.array[head_index].load(Ordering::Acquire);
+                let mut entry = self.array[head_index].load(Ordering::Acquire);
                 let mut entry_new;
                 'inner: loop {
                     let entry_cycle = entry | (2 * n - 1);
                     if entry_cycle == head_cycle {
-                        self.array[head_index].fetch_or(n - 1, Ordering::Release);
+                        self.array[head_index].fetch_or(n - 1, Ordering::AcqRel);
                         return Some(entry & (n - 1));
                     }
 
@@ -236,7 +236,14 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
                     if !compare_signed(entry_cycle, head_cycle, cmp::Ordering::Less) {
                         break 'inner;
                     }
-                    if self.array[head_index].compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed).is_ok() { break 'inner }
+                    match self.array[head_index].compare_exchange_weak(entry, entry_new, Ordering::Release, Ordering::Relaxed) {
+                        Ok(_) => {
+                            break 'inner;
+                        }
+                        Err(val) => {
+                            entry = val;
+                        }
+                    }
                 }
                 let tail = self.tail.load(Ordering::Acquire);
                 let tail = if CLOSABLE {
@@ -246,11 +253,11 @@ impl<const CLOSABLE: bool> SCQRing<CLOSABLE> {
                 };
                 if !compare_signed(tail, head + 1, cmp::Ordering::Greater) {
                     self.catchup(tail, head + 1);
-                    self.threshold.fetch_sub(1, Ordering::Release);
+                    self.threshold.fetch_sub(1, Ordering::AcqRel);
                     return None;
                 }
 
-                if self.threshold.fetch_sub(1, Ordering::Acquire) <= 0 {
+                if self.threshold.fetch_sub(1, Ordering::AcqRel) <= 0 {
                     return None;
                 }
                 break 'again;

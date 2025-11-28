@@ -115,10 +115,10 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
 
     fn fix_state(&self) {
         loop {
-            let h = self.head.load(Ordering::Acquire);
-            let t = self.tail.load(Ordering::Acquire);
+            let h = self.head.load(Ordering::Relaxed);
+            let t = self.tail.load(Ordering::Relaxed);
 
-            if self.tail.load(Ordering::Acquire) != t {
+            if self.tail.load(Ordering::Relaxed) != t {
                 continue;
             }
 
@@ -126,7 +126,7 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
                 return;
             }
 
-            if self.tail.compare_exchange(t, h, Ordering::Release, Ordering::Relaxed).is_ok() { return }
+            if self.tail.compare_exchange(t, h, Ordering::Relaxed, Ordering::Relaxed).is_ok() { return }
         }
     }
 
@@ -134,9 +134,9 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
         if CLOSABLE {
             let tt = t + 1;
             if tries < 10 {
-                self.tail.compare_exchange(tt, tt | Self::CLOSED_MASK, Ordering::Release, Ordering::Relaxed).is_ok()
+                self.tail.compare_exchange(tt, tt | Self::CLOSED_MASK, Ordering::Relaxed, Ordering::Relaxed).is_ok()
             } else {
-                self.tail.fetch_or(Self::CLOSED_MASK, Ordering::Release);
+                _ = self.tail.fetch_or(Self::CLOSED_MASK, Ordering::Relaxed);
                 true
             }
         } else {
@@ -150,7 +150,7 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
         let mut tries = 0;
         let val = Box::into_raw(Box::new(val));
         loop {
-            let t = self.tail.fetch_add(1, Ordering::Acquire);
+            let t = self.tail.fetch_add(1, Ordering::Relaxed);
             let t = if CLOSABLE {
                 let closed = t & Self::CLOSED_MASK != 0;
                 if closed {
@@ -169,15 +169,15 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
                 node.get_index() <= t && 
                     (node.is_safe() || self.head.load(Ordering::Acquire) <= t) {
                         let new_node = Node::new(t, true, val);
-                        if slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed).is_ok() {
+                        if slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Relaxed, Ordering::Relaxed).is_ok() {
                             return Ok(())
                         }
             }
-            let h = self.head.load(Ordering::Acquire);
+            let h = self.head.load(Ordering::Relaxed);
             if (t - h) as i64 >= self.array.len() as i64 {
                 if self.close(t, tries) {
                     if CLOSABLE {
-                        self.tail.fetch_or(Self::CLOSED_MASK, Ordering::Release);
+                        self.tail.fetch_or(Self::CLOSED_MASK, Ordering::Relaxed);
                     }
                     let val = unsafe {
                         *Box::from_raw(val)
@@ -191,33 +191,51 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
     }
     
     fn dequeue(&self, _: usize) -> Option<T> {
+        let h = self.head.fetch_add(1, Ordering::Relaxed);
+        let slot = &self.array[h % self.array.len()];
         loop {
-            let h = self.head.fetch_add(1, Ordering::Acquire);
-            println!("h is {h}");
-            let slot = &self.array[h % self.array.len()];
             let node = Node::<T>::from(slot.load(Ordering::Acquire));
-            loop {
-                if node.get_index() > h {
-                    break;
-                }
-                if !node.ptr.is_null() {
-                    if node.get_index() == h {
-                        let new_node = Node::<T>::new(h + self.array.len(), node.is_safe(), ptr::null_mut());
-                        if slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed).is_ok() {
+            let node_safe = node.is_safe();
+            if node.get_index() > h {
+                break;
+            }
+            if !node.ptr.is_null() {
+                if node.get_index() == h {
+                    let new_node = Node::<T>::new(h + self.array.len(), node.is_safe(), ptr::null_mut());
+                    match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed) {
+                        Ok(_) => {
                             let val = unsafe {
                                 *Box::from_raw(node.ptr)
                             };
                             return Some(val)
-                        }
+                        },
+                        Err(_) => {},
                     }
+                }
+            } else {
+                let t = self.tail.load(Ordering::Relaxed);
+                let t = if CLOSABLE {
+                    t & !Self::CLOSED_MASK
                 } else {
-                    let new_node = Node::<T>::new(h + self.array.len(), node.is_safe(), ptr::null_mut());
-                    if slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed).is_ok() { break }
+                    t
+                };
+                let new_node = Node::<T>::new(h + self.array.len(), node_safe, ptr::null_mut());
+                if !node_safe {
+                    match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Relaxed, Ordering::Relaxed) {
+                        Ok(_) => break,
+                        Err(_) => {},
+                    }
+                } else if t < h + 1 {
+                    match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Relaxed, Ordering::Relaxed) {
+                        Ok(_) => {
+                            break;
+                        },
+                        Err(_) => {},
+                    }
                 }
             }
             let t = self.tail.load(Ordering::Acquire);
             let t = if CLOSABLE {
-                t & !Self::CLOSED_MASK
             } else {
                 t
             };
@@ -226,6 +244,7 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
                 return None;
             }
         }
+        None
     }
 
 
