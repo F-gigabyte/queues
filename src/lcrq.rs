@@ -1,15 +1,23 @@
-use std::{marker::PhantomData, ptr, sync::atomic::{AtomicPtr, AtomicUsize, Ordering}};
+use std::{
+    marker::PhantomData,
+    ptr,
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
+};
 
 use crossbeam_utils::CachePadded;
 use hazard::{BoxMemory, Pointers};
 
-use crate::{atomic_types::{AtomicDUsize, DUsize}, queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull}, ring_buffer::RingBuffer};
+use crate::{
+    atomic_types::{AtomicDUsize, DUsize},
+    queue::{EnqueueResult, HandleError, HandleResult, Queue, QueueFull},
+    ring_buffer::RingBuffer,
+};
 
 #[derive(Debug)]
 struct Node<T> {
     index: usize,
     ptr: *mut T,
-    _phantom: PhantomData<T>
+    _phantom: PhantomData<T>,
 }
 
 impl<T> Node<T> {
@@ -17,10 +25,10 @@ impl<T> Node<T> {
     const SAFE_MASK: usize = 1 << Self::SAFE_SHIFT;
 
     pub fn from_index(index: usize) -> Self {
-        Self { 
-            index: index | Self::SAFE_MASK, 
-            ptr: ptr::null_mut(), 
-            _phantom: PhantomData
+        Self {
+            index: index | Self::SAFE_MASK,
+            ptr: ptr::null_mut(),
+            _phantom: PhantomData,
         }
     }
 
@@ -37,6 +45,14 @@ impl<T> Node<T> {
         self.index & Self::SAFE_MASK != 0
     }
 
+    pub fn set_safe(&mut self, safe: bool) {
+        if safe {
+            self.index |= Self::SAFE_MASK;
+        } else {
+            self.index &= !Self::SAFE_MASK;
+        }
+    }
+
     pub fn get_index(&self) -> usize {
         self.index & !Self::SAFE_MASK
     }
@@ -47,7 +63,7 @@ impl<T> Clone for Node<T> {
         Self {
             index: self.index,
             ptr: self.ptr,
-            _phantom: PhantomData
+            _phantom: PhantomData,
         }
     }
 }
@@ -56,10 +72,10 @@ impl<T> Copy for Node<T> {}
 
 impl<T> From<DUsize> for Node<T> {
     fn from(value: DUsize) -> Self {
-        Node { 
-            index: ((value >> usize::BITS) & usize::MAX as DUsize) as usize, 
-            ptr: (value & usize::MAX as DUsize) as *mut T, 
-            _phantom: PhantomData
+        Node {
+            index: ((value >> usize::BITS) & usize::MAX as DUsize) as usize,
+            ptr: (value & usize::MAX as DUsize) as *mut T,
+            _phantom: PhantomData,
         }
     }
 }
@@ -80,14 +96,24 @@ pub struct CRQ<T, const CLOSABLE: bool> {
 
 impl<T, const CLOSABLE: bool> RingBuffer<T> for CRQ<T, CLOSABLE> {
     fn new(len: usize, _: usize) -> Self {
-        let array: Box<[CachePadded<AtomicDUsize>]> = (0..len).map(|v| CachePadded::new(AtomicDUsize::new(DUsize::from(Node::<T>::from_index(v))))).collect();
-        Self { 
-            head: CachePadded::new(AtomicUsize::new(0)), 
-            tail: CachePadded::new(AtomicUsize::new(0)), 
-            array, 
-            _phantom: PhantomData 
+        let array: Box<[CachePadded<AtomicDUsize>]> = (0..len)
+            .map(|v| CachePadded::new(AtomicDUsize::new(DUsize::from(Node::<T>::from_index(v)))))
+            .collect();
+        Self {
+            head: CachePadded::new(AtomicUsize::new(0)),
+            tail: CachePadded::new(AtomicUsize::new(0)),
+            array,
+            _phantom: PhantomData,
         }
     }
+
+    fn is_closed(&self) -> bool {
+        if CLOSABLE {
+            self.tail.load(Ordering::Acquire) & Self::CLOSED_MASK != 0
+        } else {
+            false
+        }
+   }
 }
 
 impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
@@ -98,27 +124,27 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
         let elem = Box::into_raw(Box::new(elem));
         let array: Box<[CachePadded<AtomicDUsize>]> = (0..len)
             .map(|v| {
-                CachePadded::new(AtomicDUsize::new(DUsize::from(
-                if v == 0 {
+                CachePadded::new(AtomicDUsize::new(DUsize::from(if v == 0 {
                     Node::new(v, true, elem)
                 } else {
                     Node::<T>::from_index(v)
                 })))
-            }).collect();
+            })
+            .collect();
         Self {
             array,
             head: CachePadded::new(AtomicUsize::new(0)),
             tail: CachePadded::new(AtomicUsize::new(1)),
-            _phantom: PhantomData
+            _phantom: PhantomData,
         }
     }
 
     fn fix_state(&self) {
         loop {
-            let h = self.head.load(Ordering::Relaxed);
-            let t = self.tail.load(Ordering::Relaxed);
+            let h = self.head.load(Ordering::Acquire);
+            let t = self.tail.load(Ordering::Acquire);
 
-            if self.tail.load(Ordering::Relaxed) != t {
+            if self.tail.load(Ordering::Acquire) != t {
                 continue;
             }
 
@@ -126,7 +152,13 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
                 return;
             }
 
-            if self.tail.compare_exchange(t, h, Ordering::Relaxed, Ordering::Relaxed).is_ok() { return }
+            if self
+                .tail
+                .compare_exchange(t, h, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
         }
     }
 
@@ -134,9 +166,16 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
         if CLOSABLE {
             let tt = t + 1;
             if tries < 10 {
-                self.tail.compare_exchange(tt, tt | Self::CLOSED_MASK, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+                self.tail
+                    .compare_exchange(
+                        tt,
+                        tt | Self::CLOSED_MASK,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
             } else {
-                _ = self.tail.fetch_or(Self::CLOSED_MASK, Ordering::Relaxed);
+                _ = self.tail.fetch_or(Self::CLOSED_MASK, Ordering::AcqRel);
                 true
             }
         } else {
@@ -146,107 +185,102 @@ impl<T, const CLOSABLE: bool> CRQ<T, CLOSABLE> {
 }
 
 impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
-    fn enqueue(&self, val: T, _: usize) -> EnqueueResult<T> {
-        let mut tries = 0;
-        let val = Box::into_raw(Box::new(val));
+    fn enqueue(&self, mut val: T, _: usize) -> EnqueueResult<T> {
+        let mut h;
         loop {
-            let t = self.tail.fetch_add(1, Ordering::Relaxed);
-            let t = if CLOSABLE {
-                let closed = t & Self::CLOSED_MASK != 0;
-                if closed {
-                    let val = unsafe {
-                        *Box::from_raw(val)
-                    };
-                    return Err(QueueFull(val));
-                }
-                t & !Self::CLOSED_MASK
+            let t = self.tail.load(Ordering::Acquire);
+            let (t, closed) = if CLOSABLE {
+                (t & !Self::CLOSED_MASK, t & Self::CLOSED_MASK != 0)
             } else {
-                t
+                (t, false)
             };
+            if closed {
+                return Err(QueueFull(val));
+            }
             let slot = &self.array[t % self.array.len()];
             let node = Node::<T>::from(slot.load(Ordering::Acquire));
-            if node.ptr.is_null() && 
-                node.get_index() <= t && 
-                    (node.is_safe() || self.head.load(Ordering::Acquire) <= t) {
-                        let new_node = Node::new(t, true, val);
-                        if slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-                            return Ok(())
+            if node.ptr.is_null() {
+                if node.get_index() <= t && (node.is_safe() || self.head.load(Ordering::Acquire) <= t) {
+                    let ptr = Box::into_raw(Box::new(val));
+                    let new_node = Node::new(t, true, ptr);
+                    match slot.compare_exchange(u128::from(node), u128::from(new_node), Ordering::AcqRel, Ordering::Acquire) {
+                        Ok(_) => {
+                            return Ok(());
+                        },
+                        Err(_) => {
                         }
-            }
-            let h = self.head.load(Ordering::Relaxed);
-            if (t - h) as i64 >= self.array.len() as i64 {
-                if self.close(t, tries) {
-                    if CLOSABLE {
-                        self.tail.fetch_or(Self::CLOSED_MASK, Ordering::Relaxed);
                     }
-                    let val = unsafe {
-                        *Box::from_raw(val)
+                    val = unsafe {
+                        *Box::from_raw(ptr)
                     };
-                    return Err(QueueFull(val));
-                } else {
-                    tries += 1;
                 }
             }
+            h = self.head.load(Ordering::Acquire);
+            if t as i64 - h as i64 >= self.array.len() as i64 {
+                if CLOSABLE {
+                    _ = self.tail.fetch_or(Self::CLOSED_MASK, Ordering::AcqRel);
+                }
+                return Err(QueueFull(val));
+            }
+
         }
     }
-    
+
     fn dequeue(&self, _: usize) -> Option<T> {
-        let h = self.head.fetch_add(1, Ordering::Relaxed);
-        let slot = &self.array[h % self.array.len()];
         loop {
-            let node = Node::<T>::from(slot.load(Ordering::Acquire));
-            let node_safe = node.is_safe();
-            if node.get_index() > h {
-                break;
-            }
-            if !node.ptr.is_null() {
-                if node.get_index() == h {
-                    let new_node = Node::<T>::new(h + self.array.len(), node.is_safe(), ptr::null_mut());
-                    match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Release, Ordering::Relaxed) {
-                        Ok(_) => {
-                            let val = unsafe {
-                                *Box::from_raw(node.ptr)
-                            };
-                            return Some(val)
-                        },
-                        Err(_) => {},
-                    }
+            let h = self.head.fetch_add(1, Ordering::AcqRel);
+            let slot = &self.array[h % self.array.len()];
+            let mut node = Node::<T>::from(slot.load(Ordering::Acquire));
+            loop {
+                if node.get_index() > h {
+                    break;
                 }
-            } else {
-                let t = self.tail.load(Ordering::Relaxed);
-                let t = if CLOSABLE {
-                    t & !Self::CLOSED_MASK
-                } else {
-                    t
-                };
-                let new_node = Node::<T>::new(h + self.array.len(), node_safe, ptr::null_mut());
-                if !node_safe {
-                    match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Relaxed, Ordering::Relaxed) {
-                        Ok(_) => break,
-                        Err(_) => {},
+                if !node.ptr.is_null() {
+                    if node.get_index() == h {
+                        let new_node = Node::<T>::new(h + self.array.len(), node.is_safe(), ptr::null_mut());
+                        match slot.compare_exchange(u128::from(node), u128::from(new_node), Ordering::AcqRel, Ordering::Acquire) {
+                            Ok(_) => {
+                                let val = unsafe {
+                                    *Box::from_raw(node.ptr)
+                                };
+                                return Some(val);
+                            },
+                            Err(val) => {
+                                node = Node::<T>::from(val);
+                            }
+                        }
+                    } else {
+                        let mut new_node = node;
+                        new_node.set_safe(false);
+                        match slot.compare_exchange(u128::from(node), u128::from(new_node), Ordering::AcqRel, Ordering::Acquire) {
+                            Ok(_) => break,
+                            Err(val) => {
+                                node = Node::<T>::from(val);
+                            }
+                        }
                     }
-                } else if t < h + 1 {
-                    match slot.compare_exchange(DUsize::from(node), DUsize::from(new_node), Ordering::Relaxed, Ordering::Relaxed) {
-                        Ok(_) => {
-                            break;
-                        },
-                        Err(_) => {},
+                } else {
+                    let new_node = Node::<T>::new(h + self.array.len(), node.is_safe(), ptr::null_mut());
+                    match slot.compare_exchange(u128::from(node), u128::from(new_node), Ordering::AcqRel, Ordering::Acquire) {
+                        Ok(_) => break,
+                        Err(val) => {
+                            node = Node::<T>::from(val);
+                        }
                     }
                 }
             }
             let t = self.tail.load(Ordering::Acquire);
-            let t = if CLOSABLE {
+            let (t, closed) = if CLOSABLE {
+                (t & !Self::CLOSED_MASK, t & Self::CLOSED_MASK != 0)
             } else {
-                t
+                (t, false)
             };
             if t <= h + 1 {
                 self.fix_state();
                 return None;
             }
         }
-        None
     }
-
 
     fn register(&self) -> HandleResult {
         Ok(0)
@@ -255,15 +289,7 @@ impl<T, const CLOSABLE: bool> Queue<T> for CRQ<T, CLOSABLE> {
 
 impl<T, const CLOSABLE: bool> Drop for CRQ<T, CLOSABLE> {
     fn drop(&mut self) {
-        let mut h = self.head.load(Ordering::Acquire);
-        let t = self.tail.load(Ordering::Acquire) & if CLOSABLE { !Self::CLOSED_MASK } else { usize::MAX };
-        while h < t {
-            let node = Node::<T>::from(self.array[h % self.array.len()].load(Ordering::Acquire));
-            unsafe {
-                _ = Box::from_raw(node.ptr);
-            }
-            h += 1;
-        }
+        while let Some(_) = self.dequeue(0) {}
     }
 }
 
@@ -283,9 +309,9 @@ impl<QUEUE> LCRQNode<QUEUE> {
 }
 
 #[derive(Debug)]
-pub struct LCRQ<T, QUEUE=CRQ<T, true>> 
-where 
-    QUEUE: RingBuffer<T>
+pub struct LCRQ<T, QUEUE = CRQ<T, true>>
+where
+    QUEUE: RingBuffer<T>,
 {
     head: CachePadded<AtomicPtr<LCRQNode<QUEUE>>>,
     tail: CachePadded<AtomicPtr<LCRQNode<QUEUE>>>,
@@ -293,81 +319,76 @@ where
     num_threads: usize,
     ring_size: usize,
     hazard: Pointers<LCRQNode<QUEUE>, BoxMemory>,
-    _phantom: PhantomData<T>
+    _phantom: PhantomData<T>,
 }
 
 impl<T, QUEUE> LCRQ<T, QUEUE>
-where 
-    QUEUE: RingBuffer<T>
+where
+    QUEUE: RingBuffer<T>,
 {
     pub fn new(ring_size: usize, num_threads: usize) -> Self {
         let crq = Box::into_raw(Box::new(LCRQNode::new(QUEUE::new(ring_size, num_threads))));
-        Self { 
-            head: CachePadded::new(AtomicPtr::new(crq)), 
-            tail: CachePadded::new(AtomicPtr::new(crq)), 
+        Self {
+            head: CachePadded::new(AtomicPtr::new(crq)),
+            tail: CachePadded::new(AtomicPtr::new(crq)),
             hazard: Pointers::new(BoxMemory, num_threads, 1, num_threads * 2),
             num_threads,
             ring_size,
             current_thread: AtomicUsize::new(0),
-            _phantom: PhantomData
+            _phantom: PhantomData,
         }
     }
 }
 
 impl<T, QUEUE> Queue<T> for LCRQ<T, QUEUE>
-where 
-    QUEUE: RingBuffer<T>
+where
+    QUEUE: RingBuffer<T>,
 {
     fn enqueue(&self, mut item: T, handle: usize) -> EnqueueResult<T> {
         loop {
-            let crq_ptr = self.hazard.mark(handle, 0, &*self.tail);
+            let crq_ptr = self.hazard.mark_ptr(handle, 0, self.tail.load(Ordering::Acquire));
             let crq = unsafe {
                 &*crq_ptr
             };
             let next = crq.next.load(Ordering::Acquire);
             if !next.is_null() {
-                let _ = self.tail.compare_exchange(crq_ptr, next, Ordering::Release, Ordering::Relaxed);
+                _ = self.tail.compare_exchange(crq_ptr, next, Ordering::AcqRel, Ordering::Acquire);
                 continue;
             }
             match crq.node.enqueue(item, handle) {
                 Ok(_) => {
-                    self.hazard.clear(handle, 0);
-                    return Ok(())
+                    return Ok(());
                 },
                 Err(QueueFull(item2)) => {
-                    item = item2;
-                    let queue = QUEUE::new(self.ring_size, self.num_threads);
-                    queue.enqueue(item, handle).unwrap_or_else(|_| {
-                        panic!("Have full queue with an empty queue");
+                    let new_crq = QUEUE::new(self.ring_size, self.num_threads);
+                    new_crq.enqueue(item2, handle).unwrap_or_else(|_| {
+                        panic!("Queue full but empty");
                     });
-                    let new_crq = Box::into_raw(Box::new(LCRQNode::new(queue)));
-                    match crq.next.compare_exchange(ptr::null_mut(), new_crq, Ordering::Release, Ordering::Relaxed) {
+                    let new_crq = Box::into_raw(Box::new(LCRQNode {
+                        node: new_crq,
+                        next: CachePadded::new(AtomicPtr::new(ptr::null_mut()))
+                    }));
+                    match crq.next.compare_exchange(ptr::null_mut(), new_crq, Ordering::AcqRel, Ordering::Acquire) {
                         Ok(_) => {
-                            _ = self.tail.compare_exchange(crq_ptr, new_crq, Ordering::Release, Ordering::Relaxed);
-                            self.hazard.clear(handle, 0);
+                            _ = self.tail.compare_exchange(crq_ptr, new_crq, Ordering::AcqRel, Ordering::Acquire);
                             return Ok(());
                         },
                         Err(_) => {
                             let new_crq = unsafe {
                                 *Box::from_raw(new_crq)
                             };
-                            item = new_crq.node.dequeue(handle).unwrap_or_else(|| {
-                                panic!("Unable to retrieve enqueued item");
-                            });
-                        },
+                            item = new_crq.node.dequeue(handle).unwrap();
+                        }
                     }
                 }
             }
-            self.hazard.clear(handle, 0);
         }
     }
 
     fn dequeue(&self, handle: usize) -> Option<T> {
         loop {
             let crq_ptr = self.hazard.mark(handle, 0, &*self.head);
-            let crq = unsafe {
-                &*crq_ptr
-            };
+            let crq = unsafe { &*crq_ptr };
             if let Some(v) = crq.node.dequeue(handle) {
                 self.hazard.clear(handle, 0);
                 return Some(v);
@@ -378,13 +399,22 @@ where
                 return None;
             }
             self.hazard.clear(handle, 0);
-            self.hazard.retire(handle, crq_ptr);
-            _ = self.head.compare_exchange_weak(crq_ptr, next, Ordering::Release, Ordering::Relaxed);
+            match self.head.compare_exchange_weak(
+                crq_ptr,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.hazard.retire(handle, crq_ptr);
+                },
+                Err(_) => {},
+            }
         }
     }
 
     fn register(&self) -> HandleResult {
-        let thread_id = self.current_thread.fetch_add(1, Ordering::Acquire);
+        let thread_id = self.current_thread.fetch_add(1, Ordering::AcqRel);
         if thread_id < self.num_threads {
             Ok(thread_id)
         } else {
@@ -393,11 +423,14 @@ where
     }
 }
 
-unsafe impl<T, QUEUE> Send for LCRQ<T, QUEUE>
-where 
-    QUEUE: RingBuffer<T> + Send
-{}
-unsafe impl<T, QUEUE> Sync for LCRQ<T, QUEUE> 
-where 
-    QUEUE: RingBuffer<T> + Send
-{}
+impl<T, QUEUE> Drop for LCRQ<T, QUEUE>
+where
+    QUEUE: RingBuffer<T>,
+{
+    fn drop(&mut self) {
+        while let Some(_) = self.dequeue(0) {}
+    }
+}
+
+unsafe impl<T, QUEUE> Send for LCRQ<T, QUEUE> where QUEUE: RingBuffer<T> + Send {}
+unsafe impl<T, QUEUE> Sync for LCRQ<T, QUEUE> where QUEUE: RingBuffer<T> + Send {}

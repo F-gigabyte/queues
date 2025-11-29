@@ -319,6 +319,10 @@ impl<T> RingBuffer<T> for SCQDCas<T, true> {
             num_threads,
         }
     }
+
+    fn is_closed(&self) -> bool {
+        self.ring.tail.load(Ordering::Acquire) & SCQDCasRing::<T, true>::CLOSED_MASK != 0
+    }
 }
 
 impl<T> RingBuffer<T> for SCQDCas<T, false> {
@@ -333,6 +337,10 @@ impl<T> RingBuffer<T> for SCQDCas<T, false> {
             current_thread: AtomicUsize::new(0),
             num_threads,
         }
+    }
+
+    fn is_closed(&self) -> bool {
+        false
     }
 }
 

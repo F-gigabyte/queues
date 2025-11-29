@@ -64,6 +64,7 @@ fn queue_single_producer_round(queue: &str, num_threads: usize, thread_items: us
     let handle = queue.register().unwrap();
     let start_tasks = Arc::new(AtomicBool::new(false));
     let mut threads = Vec::with_capacity(num_threads);
+    println!("------------------------------------");
     for _ in 0..num_threads {
         let handle = queue.register().unwrap();
         let queue = Arc::clone(&queue);
@@ -72,14 +73,18 @@ fn queue_single_producer_round(queue: &str, num_threads: usize, thread_items: us
             while !start_tasks.load(Ordering::Acquire) {
                 std::hint::spin_loop();
             }
-            for _ in 0..thread_items {
+            let mut items: Box<[Option<Message>]> = (0..thread_items).map(|_| None).collect();
+            for i in 0..thread_items {
                 loop {
-                    if let Some(_) = queue.dequeue(handle) {
+                    if let Some(val) = queue.dequeue(handle) {
+                        items[i as usize] = Some(val);
                         break;
                     }
                     std::hint::spin_loop();
                 }
+                println!("{:?}", items.as_ref().iter().map(|item| item.as_ref().map(|item| (item.from, item.to))).collect::<Vec<Option<(u64, u64)>>>());
             }
+            println!("{handle}: {:?}", items.as_ref().iter().map(|item| item.as_ref().map(|item| (item.from, item.to))).collect::<Vec<Option<(u64, u64)>>>());
         }));
     }
     let start = Instant::now();
@@ -117,22 +122,26 @@ fn queue_single_consumer_round(queue: &str, num_threads: usize, thread_items: us
     let handle = queue.register().unwrap();
     let start_tasks = Arc::new(AtomicBool::new(false));
     let mut threads = Vec::with_capacity(num_threads);
+    println!("------------------------------------");
     for t in 0..num_threads {
         let handle = queue.register().unwrap();
         let queue = Arc::clone(&queue);
         let start_tasks = Arc::clone(&start_tasks);
         threads.push(thread::spawn(move || {
+            let mut items: Box<[Option<Message>]> = (0..thread_items).map(|_| None).collect();
             while !start_tasks.load(Ordering::Acquire) {
                 std::hint::spin_loop();
             }
             for i in 0..thread_items as u64 {
+                items[i as usize] = Some(Message {from: t as u64, to: i, data: [i; 500]});
                 queue.enqueue(Message { from: t as u64, to: i, data: [i; 500] }, handle).unwrap();
             }
+            println!("{t}: {:?}", items.as_ref().iter().map(|item| item.as_ref().map(|item| (item.from, item.to))).collect::<Vec<Option<(u64, u64)>>>());
         }));
     }
     let start = Instant::now();
     start_tasks.store(true, Ordering::Release);
-    for _ in 0..num_items {
+    for i in 0..num_items {
         loop {
             if let Some(_) = queue.dequeue(handle) {
                 break;
@@ -232,6 +241,7 @@ fn run_queue_mpmc(queue: &str, start_threads: usize, thread_inc: usize, rounds: 
 
 fn main() {
     let queues = [
+        "lcrq",
         "lock",
         "scq_cas",
         "lscq_cas",
@@ -242,12 +252,7 @@ fn main() {
         "nblfq_tagged",
         "nblfq_dcas",
         "cc_queue",
-        "lcrq",
         "wcq",
-        "crturn",
-        "wfq_ms",
-        "fp_sp",
-        "wfq",
         "rcqs",
         "rcqb",
         "rcqd"
@@ -258,7 +263,7 @@ fn main() {
     let start_threads = 1;
     let thread_inc = 2;
     let thread_items = 5;
-    let rounds = 5;
+    let rounds = 10;
     for queue in queues {
         println!("Running {queue}");
         let round = run_queue_single_producer(queue, start_threads, thread_inc, rounds, thread_items);

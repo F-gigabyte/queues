@@ -69,6 +69,10 @@ impl<T> RingBuffer<T> for LockQueue<T> {
     fn new(len: usize, _: usize) -> Self {
         Self { inner: Mutex::new(LockQueueInner::new(len)) }
     }
+
+    fn is_closed(&self) -> bool {
+        false
+    }
 }
 
 impl<T> Queue<T> for LockQueue<T> {

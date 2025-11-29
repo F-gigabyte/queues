@@ -289,6 +289,10 @@ impl<T> RingBuffer<T> for SCQCas<T, true> {
             data,
         }
     }
+
+    fn is_closed(&self) -> bool {
+        self.fq.tail.load(Ordering::Acquire) & SCQRing::<true>::CLOSED_MASK != 0
+    }
 }
 
 impl<T> RingBuffer<T> for SCQCas<T, false> {
@@ -300,6 +304,10 @@ impl<T> RingBuffer<T> for SCQCas<T, false> {
             fq: SCQRing::new_full(len), 
             data,
         }
+    }
+    
+    fn is_closed(&self) -> bool {
+        false
     }
 }
 
