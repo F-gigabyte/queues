@@ -64,7 +64,6 @@ fn queue_single_producer_round(queue: &str, num_threads: usize, thread_items: us
     let handle = queue.register().unwrap();
     let start_tasks = Arc::new(AtomicBool::new(false));
     let mut threads = Vec::with_capacity(num_threads);
-    println!("------------------------------------");
     for _ in 0..num_threads {
         let handle = queue.register().unwrap();
         let queue = Arc::clone(&queue);
@@ -82,9 +81,7 @@ fn queue_single_producer_round(queue: &str, num_threads: usize, thread_items: us
                     }
                     std::hint::spin_loop();
                 }
-                println!("{:?}", items.as_ref().iter().map(|item| item.as_ref().map(|item| (item.from, item.to))).collect::<Vec<Option<(u64, u64)>>>());
             }
-            println!("{handle}: {:?}", items.as_ref().iter().map(|item| item.as_ref().map(|item| (item.from, item.to))).collect::<Vec<Option<(u64, u64)>>>());
         }));
     }
     let start = Instant::now();
@@ -122,7 +119,6 @@ fn queue_single_consumer_round(queue: &str, num_threads: usize, thread_items: us
     let handle = queue.register().unwrap();
     let start_tasks = Arc::new(AtomicBool::new(false));
     let mut threads = Vec::with_capacity(num_threads);
-    println!("------------------------------------");
     for t in 0..num_threads {
         let handle = queue.register().unwrap();
         let queue = Arc::clone(&queue);
@@ -136,7 +132,6 @@ fn queue_single_consumer_round(queue: &str, num_threads: usize, thread_items: us
                 items[i as usize] = Some(Message {from: t as u64, to: i, data: [i; 500]});
                 queue.enqueue(Message { from: t as u64, to: i, data: [i; 500] }, handle).unwrap();
             }
-            println!("{t}: {:?}", items.as_ref().iter().map(|item| item.as_ref().map(|item| (item.from, item.to))).collect::<Vec<Option<(u64, u64)>>>());
         }));
     }
     let start = Instant::now();
@@ -241,21 +236,21 @@ fn run_queue_mpmc(queue: &str, start_threads: usize, thread_inc: usize, rounds: 
 
 fn main() {
     let queues = [
-        "lcrq",
-        "lock",
-        "scq_cas",
-        "lscq_cas",
-        "scq_dcas",
-        "lscq_dcas",
-        "ms",
-        "ms_lock",
         "nblfq_tagged",
         "nblfq_dcas",
         "cc_queue",
+        "scq_cas",
+        "scq_dcas",
+        "ms_lock",
+        "ms",
+        "lock",
+        "lcrq",
         "wcq",
         "rcqs",
         "rcqb",
-        "rcqd"
+        "rcqd",
+        "lscq_cas",
+        "lscq_dcas",
     ];
     let mut single_producer = vec![vec!["".to_string()], vec!["".to_string()]];
     let mut single_consumer = vec![vec!["".to_string()], vec!["".to_string()]];

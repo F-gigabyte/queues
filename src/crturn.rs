@@ -24,7 +24,7 @@
 /// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 /// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 /// *****************************************************************************
-use portable_atomic::{AtomicPtr, AtomicUsize};
+use portable_atomic::{AtomicIsize, AtomicPtr, AtomicUsize};
 use std::{
     mem::{self, MaybeUninit},
     ptr,
@@ -39,26 +39,26 @@ use crate::queue::{EnqueueResult, HandleError, HandleResult, Queue};
 #[derive(Debug)]
 struct Node<T> {
     item: MaybeUninit<T>,
-    enq_thread_id: usize,
-    deq_thread_id: AtomicUsize,
+    enq_thread_id: isize,
+    deq_thread_id: AtomicIsize,
     next: AtomicPtr<Node<T>>,
 }
 
 impl<T> Node<T> {
-    const INDEX_NONE: usize = usize::MAX;
+    const INDEX_NONE: isize = -1;
     pub fn new(thread_id: usize) -> Self {
         Self {
             item: MaybeUninit::uninit(),
-            enq_thread_id: thread_id,
-            deq_thread_id: AtomicUsize::new(Self::INDEX_NONE),
+            enq_thread_id: thread_id as isize,
+            deq_thread_id: AtomicIsize::new(Self::INDEX_NONE),
             next: AtomicPtr::new(ptr::null_mut()),
         }
     }
     pub fn new_with(item: T, thread_id: usize) -> Self {
         Self {
             item: MaybeUninit::new(item),
-            enq_thread_id: thread_id,
-            deq_thread_id: AtomicUsize::new(Self::INDEX_NONE),
+            enq_thread_id: thread_id as isize,
+            deq_thread_id: AtomicIsize::new(Self::INDEX_NONE),
             next: AtomicPtr::new(ptr::null_mut()),
         }
     }
@@ -82,7 +82,7 @@ impl<T> CRTurn<T> {
     const HAZARD_HEAD: usize = 0;
     const HAZARD_NEXT: usize = 1;
     const HAZARD_DEQUEUE: usize = 2;
-    const INDEX_NONE: usize = usize::MAX;
+    const INDEX_NONE: isize = -1;
     pub fn new(num_threads: usize) -> Self {
         let sentinal = Box::into_raw(Box::new(Node::new(0)));
         let enqueuers: Box<[CachePadded<AtomicPtr<Node<T>>>]> = (0..num_threads)
@@ -113,13 +113,15 @@ impl<T> CRTurn<T> {
         }
     }
 
-    fn search_next(&self, head: &Node<T>, next: &Node<T>) -> usize {
-        let turn = head.deq_thread_id.load(Ordering::SeqCst) % self.num_threads;
-        for i in turn + 1..turn + self.num_threads + 1 {
-            let id_deq = i % self.num_threads;
-            if self.deq_self[id_deq].load(Ordering::SeqCst)
-                != self.deq_help[id_deq].load(Ordering::SeqCst)
+    fn search_next(&self, head: &Node<T>, next: &Node<T>) -> isize {
+        let turn = head.deq_thread_id.load(Ordering::SeqCst);
+        let mut i = turn.wrapping_add(1);
+        while i < turn.wrapping_add(self.num_threads as isize).wrapping_add(1) {
+            let id_deq = i % self.num_threads as isize;
+            if self.deq_self[id_deq as usize].load(Ordering::SeqCst)
+                != self.deq_help[id_deq as usize].load(Ordering::SeqCst)
             {
+                i = i.wrapping_add(1);
                 continue;
             }
             if next.deq_thread_id.load(Ordering::SeqCst) == Self::INDEX_NONE {
@@ -143,20 +145,25 @@ impl<T> CRTurn<T> {
     ) {
         let next = unsafe { &*next_ptr };
         let deq_thread_id = next.deq_thread_id.load(Ordering::SeqCst);
-        if deq_thread_id == thread_id {
-            self.deq_help[deq_thread_id].store(next_ptr as *mut Node<T>, Ordering::Release);
+        if deq_thread_id == thread_id as isize {
+            self.deq_help[deq_thread_id as usize].store(next_ptr as *mut Node<T>, Ordering::Release);
         } else {
             let deq_help = self.hazard.mark_ptr(
                 thread_id,
                 Self::HAZARD_DEQUEUE,
-                self.deq_help[deq_thread_id].load(Ordering::SeqCst),
+                self.deq_help[deq_thread_id as usize].load(Ordering::SeqCst),
             );
             if !std::ptr::eq(deq_help, next_ptr) && head_ptr != self.head.load(Ordering::SeqCst) {
-                match self.deq_help[deq_thread_id].compare_exchange(deq_help, next_ptr as *mut Node<T>, Ordering::SeqCst, Ordering::SeqCst) {
-                    Ok(_) => {},
+                match self.deq_help[deq_thread_id as usize].compare_exchange(
+                    deq_help,
+                    next_ptr as *mut Node<T>,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => {}
                     Err(val) => {
                         next_ptr = val as *const Node<T>;
-                    },
+                    }
                 }
             }
         }
@@ -175,23 +182,30 @@ impl<T> CRTurn<T> {
         {
             return;
         }
-        let next = self.hazard.mark_ptr(thread_id, Self::HAZARD_NEXT, unsafe {
-            (*head).next.load(Ordering::SeqCst)
-        });
+        let head = self.hazard.mark_ptr(thread_id, Self::HAZARD_HEAD, head);
         if head != self.head.load(Ordering::SeqCst) {
             return;
         }
+        let next = self.hazard.mark_ptr(thread_id, Self::HAZARD_NEXT, unsafe {
+            (*head).next.load(Ordering::SeqCst)
+        });
         if self.search_next(unsafe { &*head }, unsafe { &*next }) == Self::INDEX_NONE {
             unsafe {
                 _ = (*next).deq_thread_id.compare_exchange(
                     Self::INDEX_NONE,
-                    thread_id,
+                    thread_id as isize,
                     Ordering::SeqCst,
                     Ordering::SeqCst,
                 );
             }
         }
         self.cas_dequeue_and_head(head, next, thread_id);
+    }
+
+    fn clear_hazard(&self, thread_id: usize) {
+        self.hazard.clear(thread_id, Self::HAZARD_TAIL);
+        self.hazard.clear(thread_id, Self::HAZARD_NEXT);
+        self.hazard.clear(thread_id, Self::HAZARD_DEQUEUE);
     }
 }
 
@@ -200,11 +214,9 @@ impl<T> Queue<T> for CRTurn<T> {
         let thread_id = handle;
         let my_node = Box::into_raw(Box::new(Node::new_with(item, thread_id)));
         self.enqueuers[thread_id].store(my_node, Ordering::SeqCst);
-        for _ in 0..self.num_threads {
+        for i in 0..self.num_threads {
             if self.enqueuers[thread_id].load(Ordering::SeqCst).is_null() {
-                self.hazard.clear(thread_id, Self::HAZARD_TAIL);
-                self.hazard.clear(thread_id, Self::HAZARD_NEXT);
-                self.hazard.clear(thread_id, Self::HAZARD_DEQUEUE);
+                self.clear_hazard(thread_id);
                 return Ok(());
             }
             let tail_ptr = self.hazard.mark_ptr(
@@ -216,8 +228,8 @@ impl<T> Queue<T> for CRTurn<T> {
                 continue;
             }
             let tail = unsafe { &*tail_ptr };
-            if self.enqueuers[tail.enq_thread_id].load(Ordering::SeqCst) == tail_ptr {
-                _ = self.enqueuers[tail.enq_thread_id].compare_exchange(
+            if self.enqueuers[tail.enq_thread_id as usize].load(Ordering::SeqCst) == tail_ptr {
+                _ = self.enqueuers[tail.enq_thread_id as usize].compare_exchange(
                     tail_ptr,
                     ptr::null_mut(),
                     Ordering::SeqCst,
@@ -225,7 +237,7 @@ impl<T> Queue<T> for CRTurn<T> {
                 );
             }
             for j in 1..self.num_threads + 1 {
-                let node_help = self.enqueuers[(j + tail.enq_thread_id) % self.num_threads]
+                let node_help = self.enqueuers[(j + tail.enq_thread_id as usize) % self.num_threads]
                     .load(Ordering::SeqCst);
                 if node_help.is_null() {
                     continue;
@@ -240,18 +252,13 @@ impl<T> Queue<T> for CRTurn<T> {
             }
             let next = tail.next.load(Ordering::SeqCst);
             if !next.is_null() {
-                _ = self.tail.compare_exchange(
-                    tail_ptr,
-                    next,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                );
+                _ = self
+                    .tail
+                    .compare_exchange(tail_ptr, next, Ordering::SeqCst, Ordering::SeqCst);
             }
         }
         self.enqueuers[thread_id].store(ptr::null_mut(), Ordering::Release);
-        self.hazard.clear(thread_id, Self::HAZARD_TAIL);
-        self.hazard.clear(thread_id, Self::HAZARD_NEXT);
-        self.hazard.clear(thread_id, Self::HAZARD_DEQUEUE);
+        self.clear_hazard(thread_id);
         Ok(())
     }
 
@@ -260,7 +267,7 @@ impl<T> Queue<T> for CRTurn<T> {
         let prev_request = self.deq_self[thread_id].load(Ordering::SeqCst);
         let my_request = self.deq_help[thread_id].load(Ordering::SeqCst);
         self.deq_self[thread_id].store(my_request, Ordering::SeqCst);
-        for _ in 0..self.num_threads {
+        for i in 0..self.num_threads {
             if self.deq_help[thread_id].load(Ordering::SeqCst) != my_request {
                 break;
             }
@@ -276,12 +283,10 @@ impl<T> Queue<T> for CRTurn<T> {
                 self.deq_self[thread_id].store(prev_request, Ordering::SeqCst);
                 self.give_up(my_request, thread_id);
                 if self.deq_help[thread_id].load(Ordering::SeqCst) != my_request {
-                    self.deq_self[thread_id].store(my_request, Ordering::Relaxed);
+                    self.deq_self[thread_id].store(my_request, Ordering::Release);
                     break;
                 }
-                self.hazard.clear(thread_id, Self::HAZARD_HEAD);
-                self.hazard.clear(thread_id, Self::HAZARD_NEXT);
-                self.hazard.clear(thread_id, Self::HAZARD_DEQUEUE);
+                self.clear_hazard(thread_id);
                 return None;
             }
 
@@ -312,12 +317,10 @@ impl<T> Queue<T> for CRTurn<T> {
                 .head
                 .compare_exchange(head, my_node, Ordering::SeqCst, Ordering::SeqCst);
         }
-        self.hazard.clear(thread_id, Self::HAZARD_HEAD);
-        self.hazard.clear(thread_id, Self::HAZARD_NEXT);
-        self.hazard.clear(thread_id, Self::HAZARD_DEQUEUE);
-        self.hazard.retire(thread_id, prev_request);
         let item =
             unsafe { mem::replace(&mut (*my_node).item, MaybeUninit::uninit()).assume_init() };
+        self.clear_hazard(thread_id);
+        self.hazard.retire(thread_id, prev_request);
         Some(item)
     }
 

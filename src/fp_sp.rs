@@ -229,7 +229,7 @@ impl<T> FpSp<T> {
         let states: Box<[CachePadded<AtomicPtr<OpDesc<T>>>]> = (0..num_threads).map(|_| CachePadded::new(AtomicPtr::new(opdesc_end))).collect();
         let handles: Box<[CachePadded<UnsafeCell<FpSpHandle>>]> = (0..num_threads).map(|i| {
             let last_phase = unsafe {
-                (*states[i].load(Ordering::SeqCst)).phase
+                (*states[i].load(Ordering::Acquire)).phase
             };
             CachePadded::new(UnsafeCell::new(Self::create_handle(i, last_phase)))
         }).collect();
@@ -248,16 +248,16 @@ impl<T> FpSp<T> {
 
     fn help(&self, phase: usize, thread_id: usize) {
         for i in 0..self.num_threads {
-            let mut desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[i].load(Ordering::SeqCst));
+            let mut desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[i].load(Ordering::Acquire));
             let mut it = 0;
             while it < self.num_threads + 1 {
-                if desc == self.states[i].load(Ordering::SeqCst) {
+                if desc == self.states[i].load(Ordering::Acquire) {
                     break;
                 }
-                desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[i].load(Ordering::SeqCst));
+                desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[i].load(Ordering::Acquire));
                 it += 1;
             }
-            if it == self.num_threads + 1 && desc != self.states[i].load(Ordering::SeqCst) {
+            if it == self.num_threads + 1 && desc != self.states[i].load(Ordering::Acquire) {
                 continue;
             }
             let desc = unsafe {
@@ -276,16 +276,16 @@ impl<T> FpSp<T> {
     fn get_max_phase(&self, thread_id: usize) -> usize {
         let mut max_phase = None;
         for i in 0..self.num_threads {
-            let mut desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[i].load(Ordering::SeqCst));
+            let mut desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[i].load(Ordering::Acquire));
             let mut it = 0;
             while it < self.num_threads + 1 {
-                if desc == self.states[i].load(Ordering::SeqCst) {
+                if desc == self.states[i].load(Ordering::Acquire) {
                     break;
                 }
-                desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[i].load(Ordering::SeqCst));
+                desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[i].load(Ordering::Acquire));
                 it += 1;
             }
-            if it == self.num_threads + 1 && desc != self.states[i].load(Ordering::SeqCst) {
+            if it == self.num_threads + 1 && desc != self.states[i].load(Ordering::Acquire) {
                 continue;
             }
             let desc = unsafe {
@@ -306,16 +306,16 @@ impl<T> FpSp<T> {
     }
 
     fn is_pending(&self, query_id: usize, phase: usize, thread_id: usize) -> bool {
-        let mut desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_NEXT, self.states[query_id].load(Ordering::SeqCst));
+        let mut desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_NEXT, self.states[query_id].load(Ordering::Acquire));
         let mut it = 0;
         while it < self.num_threads + 1 {
-            if desc == self.states[query_id].load(Ordering::SeqCst) {
+            if desc == self.states[query_id].load(Ordering::Acquire) {
                 break;
             }
-            desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_NEXT, self.states[query_id].load(Ordering::SeqCst));
+            desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_NEXT, self.states[query_id].load(Ordering::Acquire));
             it += 1;
         }
-        if it == self.num_threads + 1 && desc != self.states[query_id].load(Ordering::SeqCst) {
+        if it == self.num_threads + 1 && desc != self.states[query_id].load(Ordering::Acquire) {
             return false;
         }
         let desc = unsafe {
@@ -326,27 +326,27 @@ impl<T> FpSp<T> {
 
     fn help_enqueue(&self, query_id: usize, phase: usize, thread_id: usize) {
         while self.is_pending(query_id, phase, thread_id) {
-            let last = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.tail.load(Ordering::SeqCst));
-            if last != self.tail.load(Ordering::SeqCst) {
+            let last = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.tail.load(Ordering::Acquire));
+            if last != self.tail.load(Ordering::Acquire) {
                 continue;
             }
             let next = unsafe {
-                (*last).next.load(Ordering::SeqCst)
+                (*last).next.load(Ordering::Acquire)
             };
-            if last == self.tail.load(Ordering::SeqCst) {
+            if last == self.tail.load(Ordering::Acquire) {
                 let last = unsafe {
                     &*last
                 };
                 if next.is_null()
                     && self.is_pending(query_id, phase, thread_id) {
-                        let current_desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::SeqCst));
-                        if current_desc != self.states[query_id].load(Ordering::SeqCst) {
+                        let current_desc = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::Acquire));
+                        if current_desc != self.states[query_id].load(Ordering::Acquire) {
                             continue;
                         }
                         let current_desc = unsafe {
                             &*current_desc
                         };
-                        if last.next.compare_exchange(next, current_desc.node as *mut Node<T>, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                        if last.next.compare_exchange(next, current_desc.node as *mut Node<T>, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                             self.help_finish_enq(thread_id);
                             return;
                         }
@@ -358,32 +358,32 @@ impl<T> FpSp<T> {
     }
 
     fn help_finish_enq(&self, thread_id: usize) {
-        let last = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.tail.load(Ordering::SeqCst));
-        if last != self.tail.load(Ordering::SeqCst) {
+        let last = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.tail.load(Ordering::Acquire));
+        if last != self.tail.load(Ordering::Acquire) {
             return;
         }
-        let next = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_NEXT, unsafe {(*last).next.load(Ordering::SeqCst)});
-        if last == self.tail.load(Ordering::SeqCst) && !next.is_null() {
+        let next = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_NEXT, unsafe {(*last).next.load(Ordering::Acquire)});
+        if last == self.tail.load(Ordering::Acquire) && !next.is_null() {
 
             let query_id = unsafe {
                 (*next).enq_thread_id
             };
             if query_id != Node::<T>::INDEX_NONE {
-                let current_desc_ptr = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::SeqCst));
-                if current_desc_ptr != self.states[query_id].load(Ordering::SeqCst) {
+                let current_desc_ptr = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::Acquire));
+                if current_desc_ptr != self.states[query_id].load(Ordering::Acquire) {
                     return;
                 }
                 let current_desc = unsafe {
                     &*current_desc_ptr
                 };
-                if last == self.tail.load(Ordering::SeqCst) && current_desc.node == next {
+                if last == self.tail.load(Ordering::Acquire) && current_desc.node == next {
                     let new_desc = Box::into_raw(Box::new(OpDesc {
                         phase: current_desc.phase,
                         pending: false,
                         enqueue: true,
                         node: next
                     }));
-                    match self.states[query_id].compare_exchange(current_desc_ptr, new_desc, Ordering::SeqCst, Ordering::SeqCst) {
+                    match self.states[query_id].compare_exchange(current_desc_ptr, new_desc, Ordering::AcqRel, Ordering::Acquire) {
                         Ok(_) => {
                             self.hazard_ops.retire(thread_id, current_desc_ptr);
                         },
@@ -393,7 +393,7 @@ impl<T> FpSp<T> {
                             };
                         },
                     }
-                    _ = self.tail.compare_exchange(last, next, Ordering::SeqCst, Ordering::SeqCst);
+                    _ = self.tail.compare_exchange(last, next, Ordering::AcqRel, Ordering::Acquire);
                 }
             }
         }
@@ -401,20 +401,20 @@ impl<T> FpSp<T> {
 
     fn help_dequeue(&self, query_id: usize, phase: usize, thread_id: usize) {
         while self.is_pending(query_id, phase, thread_id) {
-            let first = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_PREV, self.head.load_ptr(Ordering::SeqCst));
-            let last = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.tail.load(Ordering::SeqCst));
-            if first != self.head.load_ptr(Ordering::SeqCst) || last != self.tail.load(Ordering::SeqCst) {
+            let first = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_PREV, self.head.load_ptr(Ordering::Acquire));
+            let last = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.tail.load(Ordering::Acquire));
+            if first != self.head.load_ptr(Ordering::AcqRel) || last != self.tail.load(Ordering::Acquire) {
                 continue;
             }
-            let next = unsafe { (*first).next.load(Ordering::SeqCst) };
-            if first == self.head.load_ptr(Ordering::SeqCst) {
+            let next = unsafe { (*first).next.load(Ordering::Acquire) };
+            if first == self.head.load_ptr(Ordering::Acquire) {
                 if first == last {
                     if next.is_null() {
-                        let current_desc_ptr = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::SeqCst));
-                        if current_desc_ptr != self.states[query_id].load(Ordering::SeqCst) {
+                        let current_desc_ptr = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::Acquire));
+                        if current_desc_ptr != self.states[query_id].load(Ordering::Acquire) {
                             continue;
                         }
-                        if last == self.tail.load(Ordering::SeqCst) && self.is_pending(query_id, phase, thread_id) {
+                        if last == self.tail.load(Ordering::Acquire) && self.is_pending(query_id, phase, thread_id) {
                             let current_desc = unsafe {
                                 &*current_desc_ptr
                             };
@@ -424,7 +424,7 @@ impl<T> FpSp<T> {
                                 enqueue: false,
                                 node: ptr::null()
                             }));
-                            match self.states[query_id].compare_exchange(current_desc_ptr, new_desc, Ordering::SeqCst, Ordering::SeqCst) {
+                            match self.states[query_id].compare_exchange(current_desc_ptr, new_desc, Ordering::AcqRel, Ordering::Acquire) {
                                 Ok(_) => {
                                     self.hazard_ops.retire(thread_id, current_desc_ptr);
                                 },
@@ -439,8 +439,8 @@ impl<T> FpSp<T> {
                         self.help_finish_enq(thread_id);
                     }
                 } else {
-                    let current_desc_ptr = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::SeqCst));
-                    if current_desc_ptr != self.states[query_id].load(Ordering::SeqCst) {
+                    let current_desc_ptr = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::Acquire));
+                    if current_desc_ptr != self.states[query_id].load(Ordering::Acquire) {
                         continue;
                     }
                     let current_desc = unsafe {
@@ -450,14 +450,14 @@ impl<T> FpSp<T> {
                     if !self.is_pending(query_id, phase, thread_id) {
                         break;
                     }
-                    if first == self.head.load_ptr(Ordering::SeqCst) && node != first {
+                    if first == self.head.load_ptr(Ordering::Acquire) && node != first {
                         let new_desc = Box::into_raw(Box::new(OpDesc {
                             phase: current_desc.phase,
                             pending: true,
                             enqueue: false,
                             node: first
                         }));
-                        match self.states[query_id].compare_exchange(current_desc_ptr, new_desc, Ordering::SeqCst, Ordering::SeqCst) {
+                        match self.states[query_id].compare_exchange(current_desc_ptr, new_desc, Ordering::AcqRel, Ordering::Acquire) {
                             Ok(_) => {
                                 self.hazard_ops.retire(thread_id, current_desc_ptr);
                             },
@@ -469,7 +469,7 @@ impl<T> FpSp<T> {
                             },
                         }
                     }
-                    _ = self.head.compare_exchange(StampedPtr::new(first, Node::<T>::INDEX_NONE), StampedPtr::new(first, query_id), Ordering::SeqCst, Ordering::SeqCst);
+                    _ = self.head.compare_exchange(StampedPtr::new(first, Node::<T>::INDEX_NONE), StampedPtr::new(first, query_id), Ordering::AcqRel, Ordering::Acquire);
                     self.help_finish_deq(thread_id);
                 }
             }
@@ -478,27 +478,27 @@ impl<T> FpSp<T> {
     }
 
     fn help_finish_deq(&self, thread_id: usize) {
-        let first_ptr = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_PREV, self.head.load_ptr(Ordering::SeqCst));
-        if first_ptr != self.head.load_ptr(Ordering::SeqCst) {
+        let first_ptr = self.hazard_nodes.mark_ptr(thread_id, Self::HAZARD_PTR_PREV, self.head.load_ptr(Ordering::Acquire));
+        if first_ptr != self.head.load_ptr(Ordering::Acquire) {
             return;
         }
         let first = unsafe {
             &*first_ptr
         };
-        let next = first.next.load(Ordering::SeqCst);
-        let query_id = self.head.load_stamp(Ordering::SeqCst);
+        let next = first.next.load(Ordering::Acquire);
+        let query_id = self.head.load_stamp(Ordering::Acquire);
         if query_id != Node::<T>::INDEX_NONE {
             let mut current_desc_ptr = ptr::null_mut();
             for i in 0..self.num_threads {
-                current_desc_ptr = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::SeqCst));
-                if current_desc_ptr == self.states[query_id].load(Ordering::SeqCst) {
+                current_desc_ptr = self.hazard_ops.mark_ptr(thread_id, Self::HAZARD_PTR_CURRENT, self.states[query_id].load(Ordering::Acquire));
+                if current_desc_ptr == self.states[query_id].load(Ordering::Acquire) {
                     break;
                 }
                 if i == self.num_threads - 1 {
                     return;
                 }
             }
-            if first_ptr == self.head.load_ptr(Ordering::SeqCst) && !next.is_null() {
+            if first_ptr == self.head.load_ptr(Ordering::Acquire) && !next.is_null() {
                 let current_desc = unsafe {
                     &*current_desc_ptr
                 };
@@ -508,7 +508,7 @@ impl<T> FpSp<T> {
                     enqueue: false,
                     node: current_desc.node
                 }));
-                match self.states[query_id].compare_exchange(current_desc_ptr, new_desc, Ordering::SeqCst, Ordering::SeqCst) {
+                match self.states[query_id].compare_exchange(current_desc_ptr, new_desc, Ordering::AcqRel, Ordering::Acquire) {
                     Ok(_) => {
                         self.hazard_ops.retire(thread_id, current_desc_ptr);
                     },
@@ -518,14 +518,14 @@ impl<T> FpSp<T> {
                         }
                     },
                 }
-                _ = self.head.compare_exchange(StampedPtr::new(first_ptr, query_id), StampedPtr::new(next, Node::<T>::INDEX_NONE), Ordering::SeqCst, Ordering::SeqCst);
+                _ = self.head.compare_exchange(StampedPtr::new(first_ptr, query_id), StampedPtr::new(next, Node::<T>::INDEX_NONE), Ordering::AcqRel, Ordering::Acquire);
             }
         }
     }
 
     fn help_if_needed(&self, handle: &mut FpSpHandle) {
         if handle.help_record.next_check == 0 {
-            let current_desc_ptr = self.hazard_ops.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.states[handle.help_record.current_thread_id].load(Ordering::SeqCst));
+            let current_desc_ptr = self.hazard_ops.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.states[handle.help_record.current_thread_id].load(Ordering::Acquire));
             let desc = unsafe {
                 &*current_desc_ptr
             };
@@ -543,7 +543,7 @@ impl<T> FpSp<T> {
     }
 
     fn slow_enqueue(&self, node_ptr: *mut Node<T>, handle: &mut FpSpHandle) -> EnqueueResult<T> {
-        let current_desc_ptr = self.hazard_ops.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.states[handle.thread_id].load(Ordering::SeqCst));
+        let current_desc_ptr = self.hazard_ops.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.states[handle.thread_id].load(Ordering::Acquire));
         let current_desc = unsafe {
             &*current_desc_ptr
         };
@@ -558,7 +558,7 @@ impl<T> FpSp<T> {
             enqueue: true,
             node: node_ptr
         }));
-        self.states[handle.thread_id].store(op_desc, Ordering::SeqCst);
+        self.states[handle.thread_id].store(op_desc, Ordering::Release);
         self.help(phase, handle.thread_id);
         self.help_finish_enq(handle.thread_id);
         self.hazard_ops.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
@@ -566,20 +566,20 @@ impl<T> FpSp<T> {
         self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
         self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_NEXT);
         self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
-        let mut desc = self.states[handle.thread_id].load(Ordering::SeqCst);
+        let mut desc = self.states[handle.thread_id].load(Ordering::Acquire);
         for _ in 0..self.num_threads * 2 {
             if std::ptr::eq(desc, self.opdesc_end) {
                 break;
             }
-            if self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::SeqCst, Ordering::SeqCst).is_ok() { break }
-            desc = self.states[handle.thread_id].load(Ordering::SeqCst);
+            if self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::AcqRel, Ordering::Acquire).is_ok() { break }
+            desc = self.states[handle.thread_id].load(Ordering::Acquire);
         }
         self.hazard_ops.retire(handle.thread_id, desc);
         Ok(())
     }
 
     fn slow_dequeue(&self, handle: &mut FpSpHandle) -> Option<T> {
-        let current_desc_ptr = self.hazard_ops.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.states[handle.thread_id].load(Ordering::SeqCst));
+        let current_desc_ptr = self.hazard_ops.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.states[handle.thread_id].load(Ordering::Acquire));
         let current_desc = unsafe {
             &*current_desc_ptr
         };
@@ -590,10 +590,10 @@ impl<T> FpSp<T> {
             enqueue: false,
             node: ptr::null()
         }));
-        self.states[handle.thread_id].store(op_desc, Ordering::SeqCst);
+        self.states[handle.thread_id].store(op_desc, Ordering::Release);
         self.help(phase, handle.thread_id);
         self.help_finish_deq(handle.thread_id);
-        let current_desc = self.hazard_ops.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.states[handle.thread_id].load(Ordering::SeqCst));
+        let current_desc = self.hazard_ops.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.states[handle.thread_id].load(Ordering::Acquire));
         let node = unsafe {
             (*current_desc).node
         };
@@ -603,10 +603,10 @@ impl<T> FpSp<T> {
             self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
             self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_NEXT);
             self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
-            let mut desc = self.states[handle.thread_id].load(Ordering::SeqCst);
+            let mut desc = self.states[handle.thread_id].load(Ordering::Acquire);
             for _ in 0..self.num_threads {
-                if self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::SeqCst, Ordering::SeqCst).is_ok() { break }
-                desc = self.states[handle.thread_id].load(Ordering::SeqCst);
+                if self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::AcqRel, Ordering::Acquire).is_ok() { break }
+                desc = self.states[handle.thread_id].load(Ordering::Acquire);
                 if std::ptr::eq(desc, self.opdesc_end) {
                     break;
                 }
@@ -615,7 +615,7 @@ impl<T> FpSp<T> {
             None
         } else {
             let next_ptr = unsafe {
-                (*node).next.load(Ordering::SeqCst)
+                (*node).next.load(Ordering::Acquire)
             };
             let next = unsafe {
                 &mut *next_ptr
@@ -623,8 +623,8 @@ impl<T> FpSp<T> {
             let val = unsafe {
                 mem::replace(&mut next.item, MaybeUninit::uninit()).assume_init()
             };
-            next.can_delete.store(true, Ordering::SeqCst);
-            if next.retired.load(Ordering::SeqCst) {
+            next.can_delete.store(true, Ordering::Release);
+            if next.retired.load(Ordering::Acquire) {
                 self.hazard_nodes.retire(handle.thread_id, next_ptr);
             }
 
@@ -634,19 +634,19 @@ impl<T> FpSp<T> {
             self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_NEXT);
             self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
             let can_delete = unsafe {
-                (*node).retired.store(true, Ordering::SeqCst);
-                (*node).can_delete.load(Ordering::SeqCst)
+                (*node).retired.store(true, Ordering::Release);
+                (*node).can_delete.load(Ordering::Acquire)
             };
             if can_delete {
                 self.hazard_nodes.retire(handle.thread_id, node as *mut Node<T>);
             }
-            let mut desc = self.states[handle.thread_id].load(Ordering::SeqCst);
+            let mut desc = self.states[handle.thread_id].load(Ordering::Acquire);
             for _ in 0..self.num_threads * 2 {
                 if std::ptr::eq(desc, self.opdesc_end) {
                     break;
                 }
-                if self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::SeqCst, Ordering::SeqCst).is_ok() { break }
-                desc = self.states[handle.thread_id].load(Ordering::SeqCst);
+                if self.states[handle.thread_id].compare_exchange(desc, self.opdesc_end as *mut OpDesc<T>, Ordering::AcqRel, Ordering::Acquire).is_ok() { break }
+                desc = self.states[handle.thread_id].load(Ordering::Acquire);
             }
             self.hazard_ops.retire(handle.thread_id, desc);
             Some(val)
@@ -658,7 +658,7 @@ impl<T> FpSp<T> {
             &*next_ptr
         };
         if next.enq_thread_id == Node::<T>::INDEX_NONE {
-            _ = self.tail.compare_exchange(last, next_ptr, Ordering::SeqCst, Ordering::SeqCst);
+            _ = self.tail.compare_exchange(last, next_ptr, Ordering::AcqRel, Ordering::Acquire);
         } else {
             self.help_finish_enq(thread_id);
         }
@@ -686,15 +686,15 @@ impl<T> Queue<T> for FpSp<T> {
         let node = Box::into_raw(Box::new(Node::with_item(Node::<T>::INDEX_NONE, item)));
         let mut tries = 0;
         while tries < Self::MAX_FAILURES {
-            let last_ptr = self.hazard_nodes.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.tail.load(Ordering::SeqCst));
+            let last_ptr = self.hazard_nodes.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.tail.load(Ordering::Acquire));
             let last = unsafe {
                 &*last_ptr
             };
-            let next = self.hazard_nodes.mark_ptr(handle.thread_id, Self::HAZARD_PTR_NEXT, last.next.load(Ordering::SeqCst));
-            if last_ptr == self.tail.load(Ordering::SeqCst) {
+            let next = self.hazard_nodes.mark_ptr(handle.thread_id, Self::HAZARD_PTR_NEXT, last.next.load(Ordering::Acquire));
+            if last_ptr == self.tail.load(Ordering::Acquire) {
                 if next.is_null() {
-                    if last.next.compare_exchange(next, node, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                        _ = self.tail.compare_exchange(last_ptr, node, Ordering::SeqCst, Ordering::SeqCst);
+                    if last.next.compare_exchange(next, node, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                        _ = self.tail.compare_exchange(last_ptr, node, Ordering::AcqRel, Ordering::Acquire);
                         self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
                         return Ok(());
                     }
@@ -714,13 +714,13 @@ impl<T> Queue<T> for FpSp<T> {
         self.help_if_needed(handle);
         let mut tries = 0;
         while tries < Self::MAX_FAILURES {
-            let first_ptr = self.hazard_nodes.mark_ptr(handle.thread_id, Self::HAZARD_PTR_PREV, self.head.load_ptr(Ordering::SeqCst));
+            let first_ptr = self.hazard_nodes.mark_ptr(handle.thread_id, Self::HAZARD_PTR_PREV, self.head.load_ptr(Ordering::Acquire));
             let first = unsafe {
                 &*first_ptr
             };
-            let last = self.hazard_nodes.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.tail.load(Ordering::SeqCst));
-            let next_ptr = first.next.load(Ordering::SeqCst);
-            if first_ptr == self.head.load_ptr(Ordering::SeqCst) {
+            let last = self.hazard_nodes.mark_ptr(handle.thread_id, Self::HAZARD_PTR_CURRENT, self.tail.load(Ordering::Acquire));
+            let next_ptr = first.next.load(Ordering::Acquire);
+            if first_ptr == self.head.load_ptr(Ordering::Acquire) {
                 if first_ptr == last {
                     if next_ptr.is_null() {
                         self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
@@ -728,22 +728,22 @@ impl<T> Queue<T> for FpSp<T> {
                         return None;
                     }
                     self.fix_tail(last, next_ptr, handle.thread_id);
-                } else if self.head.load_stamp(Ordering::SeqCst) == Node::<T>::INDEX_NONE {
+                } else if self.head.load_stamp(Ordering::Acquire) == Node::<T>::INDEX_NONE {
                     let next = unsafe {
                         &mut *next_ptr
                     };
-                    if self.head.compare_exchange(StampedPtr::new(first_ptr, Node::<T>::INDEX_NONE), StampedPtr::new(next_ptr, Node::<T>::INDEX_NONE), Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                    if self.head.compare_exchange(StampedPtr::new(first_ptr, Node::<T>::INDEX_NONE), StampedPtr::new(next_ptr, Node::<T>::INDEX_NONE), Ordering::AcqRel, Ordering::Acquire).is_ok() {
                         let val = unsafe {
                             mem::replace(&mut next.item, MaybeUninit::uninit()).assume_init()
                         };
-                        next.can_delete.store(true, Ordering::SeqCst);
-                        if next.retired.load(Ordering::SeqCst) {
+                        next.can_delete.store(true, Ordering::Release);
+                        if next.retired.load(Ordering::Acquire) {
                             self.hazard_nodes.retire(handle.thread_id, next_ptr);
                         }
                         self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_PREV);
                         self.hazard_nodes.clear(handle.thread_id, Self::HAZARD_PTR_CURRENT);
-                        first.retired.store(true, Ordering::SeqCst);
-                        if first.can_delete.load(Ordering::SeqCst) {
+                        first.retired.store(true, Ordering::Release);
+                        if first.can_delete.load(Ordering::Acquire) {
                             self.hazard_nodes.retire(handle.thread_id, first_ptr);
                         }
                         return Some(val);
@@ -772,7 +772,7 @@ impl<T> Drop for FpSp<T> {
     fn drop(&mut self) {
         while let Some(_) = self.dequeue(0) {}
         unsafe {
-            _ = Box::from_raw(self.head.load_ptr(Ordering::SeqCst));
+            _ = Box::from_raw(self.head.load_ptr(Ordering::Acquire));
             _ = Box::from_raw(self.opdesc_end as *mut OpDesc<T>);
         }
     }

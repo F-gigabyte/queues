@@ -357,6 +357,7 @@ where
             }
             match crq.node.enqueue(item, handle) {
                 Ok(_) => {
+                    self.hazard.clear(handle, 0);
                     return Ok(());
                 },
                 Err(QueueFull(item2)) => {
@@ -371,6 +372,7 @@ where
                     match crq.next.compare_exchange(ptr::null_mut(), new_crq, Ordering::AcqRel, Ordering::Acquire) {
                         Ok(_) => {
                             _ = self.tail.compare_exchange(crq_ptr, new_crq, Ordering::AcqRel, Ordering::Acquire);
+                            self.hazard.clear(handle, 0);
                             return Ok(());
                         },
                         Err(_) => {
