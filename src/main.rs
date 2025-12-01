@@ -257,7 +257,7 @@ fn main() {
     let mut mpmc = vec![vec!["".to_string()], vec!["".to_string()]];
     let start_threads = 1;
     let thread_inc = 2;
-    let thread_items = 5;
+    let thread_items = 1000;
     let rounds = 10;
     for queue in queues {
         println!("Running {queue}");
